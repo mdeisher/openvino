@@ -556,6 +556,18 @@ int main(int argc, char *argv[]) {
             }
         }
         size_t numInputArkFiles(inputArkFiles.size());
+
+        std::vector<std::string> bindBlobNameIn;
+        std::vector<std::string> bindBlobNameOut;
+        if (!FLAGS_bind.empty()) {
+            std::string pairStr;
+            std::istringstream stream(FLAGS_bind);
+            while (getline(stream, pairStr, ',')) {
+                size_t i = pairStr.find(':');
+                bindBlobNameIn.push_back(pairStr.substr(0, i));
+                bindBlobNameOut.push_back(pairStr.substr(i + 1));
+            }
+        }
         // -----------------------------------------------------------------------------------------------------
 
         // --------------------------- 1. Load inference engine -------------------------------------
@@ -574,7 +586,7 @@ int main(int argc, char *argv[]) {
         if (!FLAGS_m.empty()) {
             /** Read network model **/
             network = ie.ReadNetwork(FLAGS_m);
-            CheckNumberOfInputs(network.getInputsInfo().size(), numInputArkFiles);
+            CheckNumberOfInputs(network.getInputsInfo().size(), numInputArkFiles + bindBlobNameOut.size());
             // -------------------------------------------------------------------------------------------------
 
             // --------------------------- 3. Set batch size ---------------------------------------------------
@@ -658,6 +670,12 @@ int main(int argc, char *argv[]) {
         }
         // -----------------------------------------------------------------------------------------------------
 
+        for (auto out : bindBlobNameOut) {
+            network.addOutput(out);
+            
+        }
+
+
         // --------------------------- 6. Loading model to the device ------------------------------------------
 
         if (useGna) {
@@ -704,11 +722,15 @@ int main(int argc, char *argv[]) {
         // --------------------------- 8. Prepare input blobs --------------------------------------------------
         /** Taking information about all topology inputs **/
         ConstInputsDataMap cInputInfo = executableNet.GetInputsInfo();
-        CheckNumberOfInputs(cInputInfo.size(), numInputArkFiles);
+        CheckNumberOfInputs(cInputInfo.size(), numInputArkFiles + bindBlobNameOut.size());
 
         /** Stores all input blobs data **/
         std::vector<Blob::Ptr> ptrInputBlobs;
         for (auto& input : cInputInfo) {
+            // skip inputs that are bound to outputs
+            if (std::find(bindBlobNameIn.begin(), bindBlobNameIn.end(), input.second->name()) != bindBlobNameIn.end()) {
+                continue;
+            }
             ptrInputBlobs.push_back(inferRequests.begin()->inferRequest.GetBlob(input.first));
         }
 
@@ -735,12 +757,24 @@ int main(int argc, char *argv[]) {
 
         for (auto &item : outputInfo) {
             DataPtr outData = item.second;
+            // skip outputs that are bound to inputs
+            if (std::find(bindBlobNameOut.begin(), bindBlobNameOut.end(), outData->getName()) != bindBlobNameOut.end()) {
+                continue;
+            }
             if (!outData) {
                 throw std::logic_error("output data pointer is not valid");
             }
 
             Precision outputPrecision = Precision::FP32;  // specify Precision::I32 to retrieve quantized outputs
             outData->setPrecision(outputPrecision);
+        }
+        // -----------------------------------------------------------------------------------------------------
+
+        // ----------------------------- 9b. bind blobs if needed -----------------------------------------------
+        for (uint32_t i = 0; i < bindBlobNameOut.size(); i++) {
+            for (auto request : inferRequests) {
+                request.inferRequest.SetBlob(bindBlobNameIn[i], request.inferRequest.GetBlob(bindBlobNameOut[i]));
+            }
         }
         // -----------------------------------------------------------------------------------------------------
 
