@@ -81,6 +81,9 @@ static const char context_window_message_r[] = "Optional. Number of frames for r
                                                "Works only with context window networks."
                                                " If you use the cw_r or cw_l flag, then batch size and nthreads arguments are ignored.";
 
+/// @brief message for right context window argument
+static const char bind_message[] = "Optional. Bind input blobs to output blobs given comma separated blob names (e.g., for passing LSTM states)";
+
 /// \brief Define flag for showing help message <br>
 DEFINE_bool(h, false, help_message);
 
@@ -145,6 +148,9 @@ DEFINE_int32(cw_r, 0, context_window_message_r);
 /// @brief Left context window size (default 0)
 DEFINE_int32(cw_l, 0, context_window_message_l);
 
+/// @brief Scale factor for quantization (default 1.0)
+DEFINE_string(bind, "", bind_message);
+
 /**
  * \brief This function show a help message
  */
@@ -173,5 +179,6 @@ static void showUsage() {
     std::cout << "    -nthreads \"<integer>\"   " << infer_num_threads_message << std::endl;
     std::cout << "    -cw_l \"<integer>\"       " << context_window_message_l << std::endl;
     std::cout << "    -cw_r \"<integer>\"       " << context_window_message_r << std::endl;
+    std::cout << "    -bind in0:out0,in1:out1" << bind_message << std::endl;
 }
 
