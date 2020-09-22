@@ -707,7 +707,7 @@ void InsertCopyLayerPass::run() {
                 // memory usualy preceded by either activation or split, or other layers in order to have 2b precision
                 for (auto && inputto : getInputTo(prevLayers[i].first->outData[prevLayers[i].second])) {
                     // if preceding layer is common for memory and concat
-                    if (LayerInfo(inputto.second).isConcat()) {
+                    if (LayerInfo(inputto.second).isConcat() || LayerInfo(inputto.second).isSplit()) {
                         bInsertDelayed = true;
                         break;
                     }
@@ -1372,18 +1372,29 @@ void FuseMultipleIdentitiesPass::run() {
         auto isNonFunctional = [](CNNLayerPtr ptr) {
             return LayerInfo(ptr).isNonFunctional();
         };
+
         if (LayerInfo(l).hasMultipleInputs()) {
             continue;
         }
+
+        auto eltwise = dynamic_cast<InferenceEngine::EltwiseLayer *>(l.get());
+        auto concat = dynamic_cast<InferenceEngine::ConcatLayer *>(l.get());
+
+        if (eltwise || concat) {
+            continue;
+        }
+
         if (LayerInfo(l).isNonFunctional() || LayerInfo(l).has32BInput()) {
             continue;
         }
         gnalog() << "CNNNetPrevLayer skip non functional from :: " << l->name;
+
         auto isFunctional = [](CNNLayerPtr ptr) {
-            return !LayerInfo(ptr).isNonFunctional();
+            return !LayerInfo(ptr).isNonFunctional() && !LayerInfo(ptr).isIdentity();
         };
 
         auto prevLayersReached = CNNNetGetPrevLayersSkip(l, isFunctional);
+
         prevLayersReached.erase(std::remove_if(prevLayersReached.begin(),
                                                prevLayersReached.end(),
                                                [] (const std::pair<CNNLayerPtr, int> & candidate) {
@@ -1408,14 +1419,19 @@ void FuseMultipleIdentitiesPass::run() {
 
         std::vector<CNNLayerPtr> resultSet = CNNNetGetAllNextLayersSkipCertain(prevLayer, outDataIdx, isNonFunctional);
 
+        if (resultSet.size() < 2) {
+            continue;
+        }
         // now result set should have all needed layers
         // checking that result set consist of already identity
         CNNLayerPtr  alreadyIdentity;
+        size_t alreadyIdx = 0;
         for (auto &&res : resultSet) {
             if (LayerInfo(res).isIdentity()) {
                 alreadyIdentity = res;
                 break;
             }
+            alreadyIdx++;
         }
         if (!alreadyIdentity) {
             continue;
@@ -1428,14 +1444,15 @@ void FuseMultipleIdentitiesPass::run() {
             for (auto inIterator = inputTo.begin(); inIterator != inputTo.end(); inIterator++) {
                 if (inIterator->second == l) {
                     inputTo.erase(inIterator);
+                    CNNNetworkRemoveLayer(directPrev);
                     break;
                 }
             }
             l->insData.clear();
 
             //2nd stage - now setting up new connection
-            l->insData.push_back(alreadyIdentity->outData.front());
-            getInputTo(alreadyIdentity->outData.front())[l->name] = l;
+            l->insData.push_back(resultSet[resultSet.size() -1-alreadyIdx]->outData.front());
+            getInputTo(resultSet[resultSet.size() - 1 - alreadyIdx]->outData.front())[l->name] = l;
         }
     }
 }
