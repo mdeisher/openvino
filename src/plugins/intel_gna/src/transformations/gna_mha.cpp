@@ -9,6 +9,7 @@
 #include "openvino/cc/ngraph/itt.hpp"
 #include "openvino/opsets/opset12.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
+#include "openvino/pass/pattern/op/or.hpp"
 
 #include "gna_helper.hpp"
 
@@ -85,6 +86,61 @@ std::shared_ptr<ov::op::v0::Constant> GnaNewConvWeights(std::shared_ptr<ov::Node
     }
 
     return new_weights_const;
+}
+
+std::shared_ptr<ov::op::v0::Constant> GnaNewConvBias(std::shared_ptr<ov::Node> node) {
+    std::shared_ptr<ov::op::v0::Constant> new_bias_const = nullptr;
+
+    auto add = std::dynamic_pointer_cast<ov::op::v1::Add>(node);
+    if (add) {
+        std::shared_ptr<ov::op::v0::FakeQuantize> bias_fq = nullptr;
+        std::shared_ptr<ov::op::v0::Constant> bias_const = nullptr;
+        const ov::Output<ov::Node>& input0 = add->input_value(0);
+        const ov::Output<ov::Node>& input1 = add->input_value(1);
+        auto fq0 = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(input0.get_node()->shared_from_this());
+        auto fq1 = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(input1.get_node()->shared_from_this());
+        auto bias0 = std::dynamic_pointer_cast<ngraph::op::Constant>(input0.get_node()->shared_from_this());
+        auto bias1 = std::dynamic_pointer_cast<ngraph::op::Constant>(input1.get_node()->shared_from_this());
+        if (fq0) {
+            bias_const = std::dynamic_pointer_cast<ngraph::op::Constant>(fq0->input_value(0).get_node()->shared_from_this());
+            if (bias_const) {
+                bias_fq = fq0;
+            } else if (fq1) {
+                bias_const = std::dynamic_pointer_cast<ngraph::op::Constant>(fq1->input_value(0).get_node()->shared_from_this());
+                if (bias_const) {
+                    bias_fq = fq1;
+                }
+            }
+        } else if (fq1) {
+            bias_const = std::dynamic_pointer_cast<ngraph::op::Constant>(fq1->input_value(0).get_node()->shared_from_this());
+            if (bias_const) {
+                bias_fq = fq1;
+            }
+        } else if (bias0) {
+            bias_const = bias0;
+        } else if (bias1) {
+            bias_const = bias1;
+        }
+        if (bias_const) {
+            auto bias_shape = bias_const->get_output_shape(0);
+            const float* bias_ptr = bias_const->get_data_ptr<float>();
+            size_t len = 1;
+            for (size_t i = 0; i < bias_shape.size(); i++) {
+                len *= bias_shape[i];
+            }
+            std::vector<float> new_bias(len, 0.0f);
+            float* new_bias_ptr = new_bias.data();
+            ov::Shape new_bias_shape;
+            new_bias_shape.push_back(1);
+            new_bias_shape.push_back(1);
+            new_bias_shape.push_back(1);
+            new_bias_shape.push_back(len);
+            memcpy(new_bias_ptr, bias_ptr, new_bias.size() * sizeof(float));
+            new_bias_const = ov::op::v0::Constant::create(ngraph::element::f32, new_bias_shape, new_bias);
+        }
+    }
+
+    return new_bias_const;
 }
 
 ov::OutputVector GnaTransposeSplit(ov::Output<ov::Node>& prev, size_t C, bool transpose_output, bool zero_pad, bool insert_fq) {
@@ -201,6 +257,29 @@ ov::OutputVector GnaTransposeSplit(ov::Output<ov::Node>& prev, size_t C, bool tr
     }
 }
 
+std::shared_ptr<ov::intel_gna::op::GNAConvolution> InsertGnaConvolution(const ov::Output<ov::Node>& input, std::shared_ptr<ov::Node> matmul,
+                                                                        std::shared_ptr<ov::Node> add, size_t H, size_t W, size_t C) {
+    std::shared_ptr<ov::intel_gna::op::GNAConvolution> conv = nullptr;
+    auto reshape = std::make_shared<Reshape>(input, Constant::create(ov::element::i64, ov::Shape{4}, {1ull, H, 1ull, C * W})->output(0), false);
+    std::shared_ptr<ov::op::v0::Constant> weights_const = GnaNewConvWeights(matmul);
+    auto matmulfq = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(matmul->input_value(1).get_node()->shared_from_this());
+    ov::OutputVector weights;
+    weights.push_back(weights_const->output(0));
+    if (matmulfq) {
+        auto weightsfq = CopyFQ(weights_const->output(0), matmulfq);
+        weights[0] = weightsfq->output(0);
+    }
+    if (add) {
+        auto bias_const = GnaNewConvBias(add);
+        conv = std::make_shared<ov::intel_gna::op::GNAConvolution>(reshape->output(0), weights[0], bias_const->output(0),
+            ov::Strides{1, 1}, ov::CoordinateDiff{0, 0}, ov::CoordinateDiff{0, 0}, ov::Strides{1, 1}, ov::op::PadType::VALID );
+    } else {
+        conv = std::make_shared<ov::intel_gna::op::GNAConvolution>(reshape->output(0), weights[0],
+            ov::Strides{1, 1}, ov::CoordinateDiff{0, 0}, ov::CoordinateDiff{0, 0}, ov::Strides{1, 1}, ov::op::PadType::VALID );
+    }
+    return conv;
+}
+
 //#define PRE_LAYOUT
 
 // GNA Multihead Attention factorization
@@ -223,9 +302,18 @@ GnaMhaTransformation::GnaMhaTransformation() {
     auto matmul_pattern_1a = pattern::wrap_type<MatMul>({transpose_pattern_2a, pattern::any_input()});
     auto matmul_pattern_1b = pattern::wrap_type<MatMul>({transpose_pattern_2b, pattern::any_input()});
     auto matmul_pattern_1c = pattern::wrap_type<MatMul>({transpose_pattern_2c, pattern::any_input()});
-    auto reshape_pattern_1a = pattern::wrap_type<Reshape>({matmul_pattern_1a, pattern::any_input()});
-    auto reshape_pattern_1b = pattern::wrap_type<Reshape>({matmul_pattern_1b, pattern::any_input()});
-    auto reshape_pattern_1c = pattern::wrap_type<Reshape>({matmul_pattern_1c, pattern::any_input()});
+    auto add_pattern_1a = pattern::wrap_type<Add>({matmul_pattern_1a, pattern::any_input()});
+    auto add_pattern_1b = pattern::wrap_type<Add>({matmul_pattern_1b, pattern::any_input()});
+    auto add_pattern_1c = pattern::wrap_type<Add>({matmul_pattern_1c, pattern::any_input()});
+    auto addrev_pattern_1a = pattern::wrap_type<Add>({pattern::any_input(), matmul_pattern_1a});
+    auto addrev_pattern_1b = pattern::wrap_type<Add>({pattern::any_input(), matmul_pattern_1b});
+    auto addrev_pattern_1c = pattern::wrap_type<Add>({pattern::any_input(), matmul_pattern_1c});
+    auto matmuladd_pattern_1a = std::make_shared<pattern::op::Or>(OutputVector{matmul_pattern_1a, add_pattern_1a, addrev_pattern_1a});
+    auto matmuladd_pattern_1b = std::make_shared<pattern::op::Or>(OutputVector{matmul_pattern_1b, add_pattern_1b, addrev_pattern_1b});
+    auto matmuladd_pattern_1c = std::make_shared<pattern::op::Or>(OutputVector{matmul_pattern_1c, add_pattern_1c, addrev_pattern_1c});
+    auto reshape_pattern_1a = pattern::wrap_type<Reshape>({matmuladd_pattern_1a, pattern::any_input()});
+    auto reshape_pattern_1b = pattern::wrap_type<Reshape>({matmuladd_pattern_1b, pattern::any_input()});
+    auto reshape_pattern_1c = pattern::wrap_type<Reshape>({matmuladd_pattern_1c, pattern::any_input()});
     auto transpose_pattern_3a = pattern::wrap_type<Transpose>({reshape_pattern_1a, pattern::any_input()});
     auto transpose_pattern_3b = pattern::wrap_type<Transpose>({reshape_pattern_1b, pattern::any_input()});
 #ifdef PRE_LAYOUT
@@ -248,7 +336,9 @@ GnaMhaTransformation::GnaMhaTransformation() {
 #else
     auto reshape_pattern_3 = pattern::wrap_type<Reshape>({reshape_pattern_2, pattern::any_input()});
     auto matmul_pattern_3 = pattern::wrap_type<ov::intel_gna::op::GNAConvolution>({reshape_pattern_3, pattern::any_input()});
-    auto reshape_pattern_4 = pattern::wrap_type<Reshape>({matmul_pattern_3, pattern::any_input()});
+    auto matmuladd_pattern_3 = pattern::wrap_type<ov::intel_gna::op::GNAConvolution>({reshape_pattern_3, pattern::any_input(), pattern::any_input()});
+    auto matmulor_pattern_3 = std::make_shared<pattern::op::Or>(OutputVector{matmul_pattern_3, matmuladd_pattern_3});
+    auto reshape_pattern_4 = pattern::wrap_type<Reshape>({matmulor_pattern_3, pattern::any_input()});
 #endif
 
     ov::matcher_pass_callback callback = [=](pattern::Matcher& m) {
@@ -281,9 +371,15 @@ GnaMhaTransformation::GnaMhaTransformation() {
         auto matmul2abc = pattern_map.at(matmul_pattern_2abc).get_node_shared_ptr();
         auto transpose4 = pattern_map.at(transpose_pattern_4).get_node_shared_ptr();
         auto reshape2 = pattern_map.at(reshape_pattern_2).get_node_shared_ptr();
-        auto matmul3 = pattern_map.at(matmul_pattern_3).get_node_shared_ptr();
 
-        auto children = softmax->output(0).get_target_inputs();
+        auto children = matmul1a->output(0).get_target_inputs();
+        auto add1a = std::dynamic_pointer_cast<Add>(children.begin()->get_node()->shared_from_this());
+        children = matmul1b->output(0).get_target_inputs();
+        auto add1b = std::dynamic_pointer_cast<Add>(children.begin()->get_node()->shared_from_this());
+        children = matmul1c->output(0).get_target_inputs();
+        auto add1c = std::dynamic_pointer_cast<Add>(children.begin()->get_node()->shared_from_this());
+
+        children = softmax->output(0).get_target_inputs();
         if (children.size() != 2) {
             return false;
         }
@@ -378,18 +474,9 @@ GnaMhaTransformation::GnaMhaTransformation() {
         auto C = transpose3c_output_shape[0];
         auto H = transpose3c_output_shape[1];
         auto W = transpose3c_output_shape[2];
-        auto new_reshape1a = std::make_shared<Reshape>(input1a, Constant::create(element::i64, Shape{4}, {1ull, H, 1ull, C * W})->output(0), false);
-        auto new_reshape1b = std::make_shared<Reshape>(input1b, Constant::create(element::i64, Shape{4}, {1ull, H, 1ull, C * W})->output(0), false);
-        auto new_reshape1c = std::make_shared<Reshape>(input1c, Constant::create(element::i64, Shape{4}, {1ull, H, 1ull, C * W})->output(0), false);
-        std::shared_ptr<ov::op::v0::Constant> new_weights1a_const = GnaNewConvWeights(matmul1a);
-        std::shared_ptr<ov::op::v0::Constant> new_weights1b_const = GnaNewConvWeights(matmul1b);
-        std::shared_ptr<ov::op::v0::Constant> new_weights1c_const = GnaNewConvWeights(matmul1c);
-        auto conv1a = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape1a->output(0),new_weights1a_const->output(0),
-            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
-        auto conv1b = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape1b->output(0),new_weights1b_const->output(0),
-            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
-        auto conv1c = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape1c->output(0),new_weights1c_const->output(0), 
-            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
+        auto conv1a = InsertGnaConvolution(input1a, matmul1a, add1a, H, W, C);
+        auto conv1b = InsertGnaConvolution(input1b, matmul1b, add1b, H, W, C);
+        auto conv1c = InsertGnaConvolution(input1c, matmul1c, add1c, H, W, C);
         OutputVector part_a = GnaTransposeSplit(conv1a->output(0), C, true, false, false);
         OutputVector part_b = GnaTransposeSplit(conv1b->output(0), C, false, true, false);
         OutputVector part_c = GnaTransposeSplit(conv1c->output(0), C, true, true, false);
@@ -474,10 +561,20 @@ GnaMhaFqTransformation::GnaMhaFqTransformation() {
     auto matmul_pattern_1a = pattern::wrap_type<MatMul>({transpose_pattern_2a, matmulfq_pattern_1a});
     auto matmul_pattern_1b = pattern::wrap_type<MatMul>({transpose_pattern_2b, matmulfq_pattern_1b});
     auto matmul_pattern_1c = pattern::wrap_type<MatMul>({transpose_pattern_2c, matmulfq_pattern_1c});
-    auto reshapefq_pattern_1a = pattern::wrap_type<FakeQuantize>({matmul_pattern_1a,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
-    auto reshapefq_pattern_1b = pattern::wrap_type<FakeQuantize>({matmul_pattern_1b,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
-    auto reshapefq_pattern_1c = pattern::wrap_type<FakeQuantize>({matmul_pattern_1c,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
-    auto reshape_pattern_1a = pattern::wrap_type<Reshape>({reshapefq_pattern_1a, pattern::any_input()});
+    auto add_pattern_1a = pattern::wrap_type<Add>({matmul_pattern_1a, pattern::any_input()});
+    auto add_pattern_1b = pattern::wrap_type<Add>({matmul_pattern_1b, pattern::any_input()});
+    auto add_pattern_1c = pattern::wrap_type<Add>({matmul_pattern_1c, pattern::any_input()});
+    auto addrev_pattern_1a = pattern::wrap_type<Add>({pattern::any_input(), matmul_pattern_1a});
+    auto addrev_pattern_1b = pattern::wrap_type<Add>({pattern::any_input(), matmul_pattern_1b});
+    auto addrev_pattern_1c = pattern::wrap_type<Add>({pattern::any_input(), matmul_pattern_1c});
+    auto matmuladd_pattern_1a = std::make_shared<pattern::op::Or>(OutputVector{matmul_pattern_1a, add_pattern_1a, addrev_pattern_1a});
+    auto matmuladd_pattern_1b = std::make_shared<pattern::op::Or>(OutputVector{matmul_pattern_1b, add_pattern_1b, addrev_pattern_1b});
+    auto matmuladd_pattern_1c = std::make_shared<pattern::op::Or>(OutputVector{matmul_pattern_1c, add_pattern_1c, addrev_pattern_1c});
+    auto reshapefq_pattern_1a = pattern::wrap_type<FakeQuantize>({matmuladd_pattern_1a,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
+    auto reshapefq_pattern_1b = pattern::wrap_type<FakeQuantize>({matmuladd_pattern_1b,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
+    auto reshapefq_pattern_1c = pattern::wrap_type<FakeQuantize>({matmuladd_pattern_1c,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
+    auto missingfq_pattern_1a = std::make_shared<pattern::op::Or>(OutputVector{reshapefq_pattern_1a, matmuladd_pattern_1a});
+    auto reshape_pattern_1a = pattern::wrap_type<Reshape>({missingfq_pattern_1a, pattern::any_input()});
     auto reshape_pattern_1b = pattern::wrap_type<Reshape>({reshapefq_pattern_1b, pattern::any_input()});
     auto reshape_pattern_1c = pattern::wrap_type<Reshape>({reshapefq_pattern_1c, pattern::any_input()});
     auto transpose_pattern_3a = pattern::wrap_type<Transpose>({reshape_pattern_1a, pattern::any_input()});
@@ -496,9 +593,10 @@ GnaMhaFqTransformation::GnaMhaFqTransformation() {
     auto matmul_pattern_2bc = pattern::wrap_type<MatMul>({transpose_pattern_3c, transpose_pattern_3b});
 #endif
     auto softmaxfq_pattern = pattern::wrap_type<FakeQuantize>({matmul_pattern_2bc,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
+    auto missingfq_pattern = std::make_shared<pattern::op::Or>(OutputVector{softmaxfq_pattern, matmul_pattern_2bc});
 #define POST_SOFTMAX
 #ifdef POST_SOFTMAX
-    auto softmax_pattern = pattern::wrap_type<ov::op::v1::Softmax>({softmaxfq_pattern});
+    auto softmax_pattern = pattern::wrap_type<ov::op::v1::Softmax>({missingfq_pattern});
 #else
     auto smreshape1_pattern = pattern::wrap_type<Reshape>({softmaxfq_pattern, pattern::any_input()});
     auto smreshape2_pattern = pattern::wrap_type<Reshape>({smreshape1_pattern, pattern::any_input()});
@@ -528,7 +626,8 @@ GnaMhaFqTransformation::GnaMhaFqTransformation() {
     auto softmax_pattern = pattern::wrap_type<Exp>({smfq8_pattern});
 #endif
     auto matmulfq_pattern_2abc = pattern::wrap_type<FakeQuantize>({softmax_pattern,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
-    auto matmul_pattern_2abc = pattern::wrap_type<MatMul>({matmulfq_pattern_2abc, transpose_pattern_3a});
+    auto missingfq_pattern_2abc = std::make_shared<pattern::op::Or>(OutputVector{matmulfq_pattern_2abc, softmax_pattern});
+    auto matmul_pattern_2abc = pattern::wrap_type<MatMul>({missingfq_pattern_2abc, transpose_pattern_3a});
     auto transposefq_pattern_4 = pattern::wrap_type<FakeQuantize>({matmul_pattern_2abc,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
     auto transpose_pattern_4 = pattern::wrap_type<Transpose>({transposefq_pattern_4, pattern::any_input()});
     auto reshape_pattern_2 = pattern::wrap_type<Reshape>({transpose_pattern_4, pattern::any_input()});
@@ -541,7 +640,9 @@ GnaMhaFqTransformation::GnaMhaFqTransformation() {
 #else
     auto reshape_pattern_3 = pattern::wrap_type<Reshape>({reshape_pattern_2, pattern::any_input()});
     auto matmul_pattern_3 = pattern::wrap_type<ov::intel_gna::op::GNAConvolution>({reshape_pattern_3, pattern::any_input()});
-    auto reshapefq_pattern_4a = pattern::wrap_type<FakeQuantize>({matmul_pattern_3,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
+    auto matmuladd_pattern_3 = pattern::wrap_type<ov::intel_gna::op::GNAConvolution>({reshape_pattern_3, pattern::any_input(), pattern::any_input()});
+    auto matmulor_pattern_3 = std::make_shared<pattern::op::Or>(OutputVector{matmul_pattern_3, matmuladd_pattern_3});
+    auto reshapefq_pattern_4a = pattern::wrap_type<FakeQuantize>({matmulor_pattern_3,pattern::any_input(),pattern::any_input(),pattern::any_input(),pattern::any_input()});
     auto reshape_pattern_4 = pattern::wrap_type<Reshape>({reshapefq_pattern_4a, pattern::any_input()});
 #endif
 
@@ -566,7 +667,7 @@ GnaMhaFqTransformation::GnaMhaFqTransformation() {
         auto matmul1a = pattern_map.at(matmul_pattern_1a).get_node_shared_ptr();
         auto matmul1b = pattern_map.at(matmul_pattern_1b).get_node_shared_ptr();
         auto matmul1c = pattern_map.at(matmul_pattern_1c).get_node_shared_ptr();
-        auto reshapefq1a = pattern_map.at(reshapefq_pattern_1a).get_node_shared_ptr();
+        //auto reshapefq1a = pattern_map.at(reshapefq_pattern_1a).get_node_shared_ptr();
         auto reshapefq1b = pattern_map.at(reshapefq_pattern_1b).get_node_shared_ptr();
         auto reshapefq1c = pattern_map.at(reshapefq_pattern_1c).get_node_shared_ptr();
         auto reshape1a = pattern_map.at(reshape_pattern_1a).get_node_shared_ptr();
@@ -583,19 +684,32 @@ GnaMhaFqTransformation::GnaMhaFqTransformation() {
         auto multiplyfq1 = pattern_map.at(multiplyfq_pattern_1).get_node_shared_ptr();
         auto multiply1 = pattern_map.at(multiply_pattern_1).get_node_shared_ptr();
         auto matmul2bc = pattern_map.at(matmul_pattern_2bc).get_node_shared_ptr();
-        auto softmaxfq = pattern_map.at(softmaxfq_pattern).get_node_shared_ptr();
+        //auto softmaxfq = pattern_map.at(softmaxfq_pattern).get_node_shared_ptr();
         auto softmax = pattern_map.at(softmax_pattern).get_node_shared_ptr();
-        auto matmulfq2abc = pattern_map.at(matmulfq_pattern_2abc).get_node_shared_ptr();
+        //auto matmulfq2abc = pattern_map.at(matmulfq_pattern_2abc).get_node_shared_ptr();
         auto matmul2abc = pattern_map.at(matmul_pattern_2abc).get_node_shared_ptr();
         auto transposefq4 = pattern_map.at(transposefq_pattern_4).get_node_shared_ptr();
         auto transpose4 = pattern_map.at(transpose_pattern_4).get_node_shared_ptr();
         auto reshape2 = pattern_map.at(reshape_pattern_2).get_node_shared_ptr();
-        auto matmul3 = pattern_map.at(matmul_pattern_3).get_node_shared_ptr();
 
-        auto children = softmax->output(0).get_target_inputs();
+        auto children = matmul1a->output(0).get_target_inputs();
+        auto add1a = std::dynamic_pointer_cast<Add>(children.begin()->get_node()->shared_from_this());
+        children = matmul1b->output(0).get_target_inputs();
+        auto add1b = std::dynamic_pointer_cast<Add>(children.begin()->get_node()->shared_from_this());
+        children = matmul1c->output(0).get_target_inputs();
+        auto add1c = std::dynamic_pointer_cast<Add>(children.begin()->get_node()->shared_from_this());
+
+        children = matmul1a->output(0).get_target_inputs();
+        auto reshapefq1a = std::dynamic_pointer_cast<FakeQuantize>(children.begin()->get_node()->shared_from_this());
+
+        children = matmul2bc->output(0).get_target_inputs();
+        auto softmaxfq = std::dynamic_pointer_cast<FakeQuantize>(children.begin()->get_node()->shared_from_this());
+
+        children = softmax->output(0).get_target_inputs();
         if (children.size() != 2) {
             return false;
         }
+        auto matmulfq2abc = std::dynamic_pointer_cast<FakeQuantize>(children.begin()->get_node()->shared_from_this());
 #ifdef PRE_LAYOUT
         auto reducesum = std::dynamic_pointer_cast<ReduceSum>(children.begin()->get_node()->shared_from_this());
         children = reducesum->output(0).get_target_inputs();
@@ -701,25 +815,18 @@ GnaMhaFqTransformation::GnaMhaFqTransformation() {
         auto C = transpose3c_output_shape[0];
         auto H = transpose3c_output_shape[1];
         auto W = transpose3c_output_shape[2];
-        auto new_reshape1a = std::make_shared<Reshape>(input1a, Constant::create(element::i64, Shape{4}, {1ull, H, 1ull, C * W})->output(0), false);
-        auto new_reshape1b = std::make_shared<Reshape>(input1b, Constant::create(element::i64, Shape{4}, {1ull, H, 1ull, C * W})->output(0), false);
-        auto new_reshape1c = std::make_shared<Reshape>(input1c, Constant::create(element::i64, Shape{4}, {1ull, H, 1ull, C * W})->output(0), false);
-        std::shared_ptr<ov::op::v0::Constant> new_weights1a_const = GnaNewConvWeights(matmul1a);
-        std::shared_ptr<ov::op::v0::Constant> new_weights1b_const = GnaNewConvWeights(matmul1b);
-        std::shared_ptr<ov::op::v0::Constant> new_weights1c_const = GnaNewConvWeights(matmul1c);
-        auto weightsfq1a = CopyFQ(new_weights1a_const->output(0), matmulfq1a);
-        auto weightsfq1b = CopyFQ(new_weights1b_const->output(0), matmulfq1b);
-        auto weightsfq1c = CopyFQ(new_weights1c_const->output(0), matmulfq1c);
-        auto conv1a = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape1a->output(0), weightsfq1a->output(0),
-            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
-        auto conv1b = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape1b->output(0), weightsfq1b->output(0),
-            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
-        auto conv1c = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape1c->output(0), weightsfq1c->output(0), 
-            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
+        auto conv1a = InsertGnaConvolution(input1a, matmul1a, add1a, H, W, C);
+        auto conv1b = InsertGnaConvolution(input1b, matmul1b, add1b, H, W, C);
+        auto conv1c = InsertGnaConvolution(input1c, matmul1c, add1c, H, W, C);
         auto new_reshapefq1a = CopyFQ(conv1a->output(0), reshapefq1a);
         auto new_reshapefq1b = CopyFQ(conv1b->output(0), reshapefq1b);
         auto new_reshapefq1c = CopyFQ(conv1c->output(0), reshapefq1c);
-        OutputVector part_a = GnaTransposeSplit(new_reshapefq1a->output(0), C, true, false, true);
+        OutputVector part_a;
+        if (reshapefq1a) {
+            part_a = GnaTransposeSplit(new_reshapefq1a->output(0), C, true, false, true);
+        } else {
+            part_a = GnaTransposeSplit(conv1a->output(0), C, true, false, true);
+        }
         OutputVector part_b = GnaTransposeSplit(new_reshapefq1b->output(0), C, false, true, true);
         OutputVector part_c = GnaTransposeSplit(new_reshapefq1c->output(0), C, true, true, true);
         OutputVector out_a, out_b;
@@ -732,10 +839,20 @@ GnaMhaFqTransformation::GnaMhaFqTransformation() {
             auto new_transposefq3c = CopyFQ(new_multiply1->output(0), transposefq3c);
             auto new_matmul2bc = std::make_shared<MatMul>(new_transposefq3c->output(0), part_b[i], false, false);
             auto new_softmaxfq = CopyFQ(new_matmul2bc->output(0), softmaxfq);
-            auto new_softmax = std::make_shared<Softmax>(new_softmaxfq->output(0), 1);
+            std::shared_ptr<ov::op::v8::Softmax> new_softmax;
+            if (new_softmaxfq) {
+                new_softmax = std::make_shared<Softmax>(new_softmaxfq->output(0), 1);
+            } else {
+                new_softmax = std::make_shared<Softmax>(new_matmul2bc->output(0), 1);
+            }
             out_b.push_back(new_softmax->output(0));
             auto new_matmulfq2abc = CopyFQ(new_softmax->output(0), matmulfq2abc);
-            auto new_matmul2abc = std::make_shared<MatMul>(new_matmulfq2abc->output(0), part_a[i], false, false);
+            std::shared_ptr<ov::op::v0::MatMul> new_matmul2abc;
+            if (new_matmulfq2abc) {
+                new_matmul2abc = std::make_shared<MatMul>(new_matmulfq2abc->output(0), part_a[i], false, false);
+            } else {
+                new_matmul2abc = std::make_shared<MatMul>(new_softmax->output(0), part_a[i], false, false);
+            }
             auto new_transposefq4 = CopyFQ(new_matmul2abc->output(0), transposefq4);
             auto new_transpose3 = std::make_shared<Transpose>(new_transposefq4->output(0), 
                 Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
