@@ -42,6 +42,10 @@ static std::tuple<bool, uint32_t, uint32_t, uint32_t> VerifyAndGetConvParams(
         input1_shape.erase(std::begin(input1_shape));
     }
 
+    if (input1_shape.size() == 3 && input1_shape[1] == 1) {
+        input1_shape = ov::Shape{input1_shape[0], input1_shape[2]};
+    }
+
     if (input1_shape.size() != 2 || input2_shape.size() != 2 || output_shape.size() < 2) {
         return std::make_tuple(false, 0, 0, 0);
     }
@@ -147,8 +151,10 @@ static bool Convert(std::shared_ptr<ngraph::Node> matmul_node,
     ngraph::copy_runtime_info(conv_node, transpose_after);
 
     auto output_shape = matmul_node->get_output_shape(0);
+    if (!((output_shape.size() == 3) && (output_shape[0] != 1) && (output_shape[1] == 1))) {
     output_shape[output_shape.size() - 1] = out_channels;
     output_shape[output_shape.size() - 2] = width;
+    }
     auto reshape_const_after = std::make_shared<ngraph::opset7::Constant>(ngraph::element::Type_t::i64,
                                                                           ngraph::Shape{output_shape.size()},
                                                                           output_shape);
