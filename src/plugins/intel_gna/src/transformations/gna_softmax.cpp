@@ -26,6 +26,7 @@
 #include <ngraph/rt_info.hpp>
 
 #include "transformations/gna_softmax.hpp"
+#include "gna_helper.hpp"
 
 using namespace ngraph;
 using namespace op;
@@ -84,6 +85,7 @@ bool ngraph::pass::GnaSoftmaxDecomposition::run_on_model(const std::shared_ptr<n
         auto softmax_shape = (nullptr != softmax_v1) ? softmax_v1->get_output_shape(0) : softmax_v8->get_output_shape(0);
         auto axis = (nullptr != softmax_v1) ? softmax_v1->get_axis() : softmax_v8->get_axis();
         auto auto_broadcast = (nullptr != softmax_v1) ? softmax_v1->get_autob() : softmax_v8->get_autob();
+        auto fq_input = FindFqUpstream(parent);  // note:  POT bug requires that we invent FQ layers
         size_t N = 1, C = 1, H, W;
 
         if (softmax_shape.size() == 4) {
@@ -145,8 +147,8 @@ bool ngraph::pass::GnaSoftmaxDecomposition::run_on_model(const std::shared_ptr<n
                 }
             }
         }
-        auto copy_weights_out = MakeWeights(Shape{8, 8, 1, 1}, copy_weights, 1.0f, use_fq);
-        auto neg_broadcast_weights_out = MakeWeights(Shape{8 * W, 8, 1, 1}, neg_broadcast_weights, 1.0f, use_fq);
+        auto copy_weights_out = MakeWeights(Shape{8, 8, 1, 1}, copy_weights, 1.0f, (bool)fq_input);
+        auto neg_broadcast_weights_out = MakeWeights(Shape{8 * W, 8, 1, 1}, neg_broadcast_weights, 1.0f, (bool)fq_input);
 
         // Prepare to perform softmax sum in parts
         size_t num_parts = 1;
@@ -165,10 +167,10 @@ bool ngraph::pass::GnaSoftmaxDecomposition::run_on_model(const std::shared_ptr<n
             avg_broadcast[i * 8] = 1.0f;
         }
         // weights tensor orders are Cout,Kh,Kw,Cin
-        auto avg_weights_out = MakeWeights(Shape{8, 1, 1, W / num_parts}, avg_weights, 1.0f / W, use_fq);
-        auto avg_broadcast_out = MakeWeights(Shape{W, 1, 1, 8 * num_parts}, avg_broadcast, 1.0f, use_fq);
-        auto minus_log_W_out = MakeWeights(Shape{1, C * H * W}, minus_log_W, -log((float)W), use_fq);
-        auto minus_log_W_partial_out = MakeWeights(Shape{1, 8 * W}, minus_log_W_partial, -log((float)W), use_fq);
+        auto avg_weights_out = MakeWeights(Shape{8, 1, 1, W / num_parts}, avg_weights, 1.0f / W, (bool)fq_input);
+        auto avg_broadcast_out = MakeWeights(Shape{W, 1, 1, 8 * num_parts}, avg_broadcast, 1.0f, (bool)fq_input);
+        auto minus_log_W_out = MakeWeights(Shape{1, C * H * W}, minus_log_W, -log((float)W), (bool)fq_input);
+        auto minus_log_W_partial_out = MakeWeights(Shape{1, 8 * W}, minus_log_W_partial, -log((float)W), (bool)fq_input);
 
         auto parent_1d = std::make_shared<ngraph::opset1::Reshape>(parent,
             op::Constant::create(ngraph::element::i64, Shape{2}, {1ull, C * H * W})->output(0),false);
@@ -179,12 +181,12 @@ bool ngraph::pass::GnaSoftmaxDecomposition::run_on_model(const std::shared_ptr<n
 
         auto reshape_2 = std::make_shared<ngraph::opset1::Reshape>(upstream[0],
             op::Constant::create(ngraph::element::i64, Shape{4}, {1ull, C*H, W, 1ull})->output(0),false);
-        auto identity_out = MakeWeights1x1(Shape{1, 1, 1, 1}, 1.0f, use_fq);
+        auto identity_out = MakeWeights1x1(Shape{1, 1, 1, 1}, 1.0f, (bool)fq_input);
         auto conv_1 = std::make_shared<ov::intel_gna::op::GNAConvolution>(reshape_2->output(0),
             identity_out,Strides{1, 1},CoordinateDiff{0, 0},CoordinateDiff{0, 0},Strides{1, 1},PadType::VALID);
         auto pool_1 = std::make_shared<ov::intel_gna::op::GNAMaxPool>(conv_1->output(0), Strides{1,W}, Shape{0,0}, Shape{0,0},
             Shape{1,W}, ov::op::RoundingType::FLOOR, op::PadType::VALID);
-        auto broadcast_out = MakeWeights1x1(Shape{W, 1, 1, 1}, 1.0f, use_fq);  // identity
+        auto broadcast_out = MakeWeights1x1(Shape{W, 1, 1, 1}, 1.0f, (bool)fq_input);  // identity
         Output<Node> prev;
         if (use_fq) {
             auto pool_fq = InsertFQ(pool_1->output(0), in_scale);
