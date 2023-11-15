@@ -727,7 +727,11 @@ void GNAGraphCompiler::finalizeConvolution2DPrimitive(InferenceEngine::CNNLayerP
 
     const auto inputPrec = OvGnaTypeIntFromBytes(inputs->getPrecision().size());
     const auto outputPrec = OvGnaTypeIntFromBytes(outputs->getPrecision().size());
-    const auto weightPrec = OvGnaTypeIntFromBytes(convolution._weights->getTensorDesc().getPrecision().size());
+    auto weightPrecSize = convolution.precision.size();
+    if (convolution._weights) {
+        weightPrecSize = convolution._weights->getTensorDesc().getPrecision().size();
+    }
+    auto weightPrec = OvGnaTypeIntFromBytes(weightPrecSize);
     const auto biasPrec = OvGnaTypeIntFromBytes(biasPrecision.size());
 
     ValidateCnn2D(layer->name,
@@ -773,6 +777,8 @@ void GNAGraphCompiler::finalizeConvolution2DPrimitive(InferenceEngine::CNNLayerP
                                 outputs->getPrecision().size();
 
     size_t num_data_bytes_in = (num_inputs + num_input_padding) * inputs->getPrecision().size();
+    size_t num_data_bytes_filters =
+        (convolution._kernel_x * convolution._kernel_y * filter_n) * weightPrecSize;
 
     auto connectedInputLayer = connectInput(layer, ptr_inputs, num_data_bytes_in).input;
 
@@ -785,23 +791,28 @@ void GNAGraphCompiler::finalizeConvolution2DPrimitive(InferenceEngine::CNNLayerP
     const auto effective_kernel_h_w = convolution._kernel_y * effective_kernel_width;
     const auto effective_single_kernel_size = in_channels * effective_kernel_h_w * convolution_precision;
 
-    std::vector<uint8_t> transposed_weights;
+    if (convolution._weights) {
+        std::vector<uint8_t> transposed_weights;
 
-    // Kernel is extended only for 1D case which allows to add 0-s at the end of the kernel.
-    const auto kernel_pad =
-        ALIGN(effective_single_kernel_size, Limitations::kConvEachKernelByteAlignment) - effective_single_kernel_size;
-    for (uint32_t k = 0; k < convolution._out_depth; k++) {
-        uint8_t* ptr_filt_current = convolution._weights->cbuffer().as<uint8_t*>() + k * single_kernel_size;
-        auto transposed_part = copy_matrix(ptr_filt_current, convolution.precision.size(), in_channels, kernelHW);
-        transposed_weights.insert(transposed_weights.end(), transposed_part.begin(), transposed_part.end());
-        transposed_weights.resize(transposed_weights.size() + effective_single_kernel_size - single_kernel_size +
-                                  kernel_pad);
+        // Kernel is extended only for 1D case which allows to add 0-s at the end of the kernel.
+        const auto kernel_pad = ALIGN(effective_single_kernel_size, Limitations::kConvEachKernelByteAlignment) -
+                                effective_single_kernel_size;
+        auto number_of_kernels_to_combine = convolution._out_depth;
+        for (uint32_t k = 0; k < number_of_kernels_to_combine; k++) {
+            uint8_t* ptr_filt_current = convolution._weights->cbuffer().as<uint8_t*>() + k * single_kernel_size;
+            auto transposed_part = copy_matrix(ptr_filt_current, convolution.precision.size(), in_channels, kernelHW);
+            transposed_weights.insert(transposed_weights.end(), transposed_part.begin(), transposed_part.end());
+            transposed_weights.resize(transposed_weights.size() + effective_single_kernel_size - single_kernel_size +
+                                      kernel_pad);
+        }
+
+        gnamem->getQueue(REGION_RO)->push_local_ptr(layer,
+                                                    ptr_weights,
+                                                    transposed_weights.data(),
+                                                    transposed_weights.size());
+    } else {
+        connectInput(layer, ptr_weights, num_data_bytes_filters, 0, 1);
     }
-
-    gnamem->getQueue(REGION_RO)->push_local_ptr(layer,
-                                                ptr_weights,
-                                                transposed_weights.data(),
-                                                transposed_weights.size());
 
     if (convolution._biases) {
         gnamem->getQueue(REGION_RO)->push_ptr(layer,

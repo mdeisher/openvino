@@ -111,7 +111,11 @@ std::pair<size_t, size_t> LayerQuantizer::GetNumRowsColumns(InferenceEngine::Wei
             THROW_GNA_EXCEPTION << "Invalid nummber of rows";
         }
 
-        num_columns = wl._weights->size() / num_rows;
+        if (!wl._weights) {
+            num_columns = wl.insData[1].lock().get()->getDims()[2];
+        } else {
+            num_columns = wl._weights->size() / num_rows;
+        }
     } else if (LayerInfo(wl).isAffineFilter() || LayerInfo(wl).isConcatAlignFilter()) {
         // For affine filter layer insdata size is not equal to the one stored in input layer
         num_rows = wl.outData.front()->getDims().back();
@@ -127,35 +131,38 @@ std::pair<size_t, size_t> LayerQuantizer::GetNumRowsColumns(InferenceEngine::Wei
 template <class WeightsType>
 void LayerQuantizer::QuantizeWeightsPrep(InferenceEngine::WeightableLayer& wl, QuantizationData& common_data) {
     const auto weights_precision = InferenceEngine::Precision::fromType<WeightsType>();
-    const auto int_weights = InferenceEngine::make_shared_blob<WeightsType>(
-        InferenceEngine::TensorDesc(weights_precision,
-                                    InferenceEngine::SizeVector({wl._weights->size()}),
-                                    InferenceEngine::C));
+    if (wl._weights) {
+        const auto int_weights = InferenceEngine::make_shared_blob<WeightsType>(
+            InferenceEngine::TensorDesc(weights_precision,
+                                        InferenceEngine::SizeVector({wl._weights->size()}),
+                                        InferenceEngine::C));
 
-    int_weights->allocate();
+        int_weights->allocate();
 
-    if (int_weights->buffer() == nullptr) {
-        IE_THROW(NotAllocated) << "[GNAPlugin] in function " << __PRETTY_FUNCTION__ << ": "
-                               << "cannot copy weights for layer :" << wl.name << " of size" << int_weights->byteSize();
+        if (int_weights->buffer() == nullptr) {
+            IE_THROW(NotAllocated) << "[GNAPlugin] in function " << __PRETTY_FUNCTION__ << ": "
+                                   << "cannot copy weights for layer :" << wl.name << " of size"
+                                   << int_weights->byteSize();
+        }
+
+        common_data.scale_factor =
+            InferenceEngine::getInjectedData<QuantizedLayerParams>(wl)->_weights_quant.GetScale();
+        const auto& blob_precision = wl._weights->getTensorDesc().getPrecision();
+        const auto& quantized_weights =
+            blob_precision != InferenceEngine::Precision::FP32 && blob_precision != InferenceEngine::Precision::FP16;
+        const bool& compound_bias =
+            IsBiasCompound(LayerInfo(wl), *InferenceEngine::getInjectedData<QuantizedLayerParams>(wl), gna_config);
+        const auto& compound_bias_ptr =
+            (compound_bias && wl._biases) ? wl._biases->buffer().as<gna_compound_bias_t*>() : nullptr;
+
+        QuantizeWeights<WeightsType>(common_data,
+                                     wl._weights->buffer().as<float*>(),
+                                     int_weights->buffer(),
+                                     compound_bias_ptr,
+                                     quantized_weights);
+
+        wl._weights = int_weights;
     }
-
-    common_data.scale_factor = InferenceEngine::getInjectedData<QuantizedLayerParams>(wl)->_weights_quant.GetScale();
-    const auto& blob_precision = wl._weights->getTensorDesc().getPrecision();
-    const auto& quantized_weights =
-        blob_precision != InferenceEngine::Precision::FP32 && blob_precision != InferenceEngine::Precision::FP16;
-    const bool& compound_bias =
-        IsBiasCompound(LayerInfo(wl), *InferenceEngine::getInjectedData<QuantizedLayerParams>(wl), gna_config);
-    const auto& compound_bias_ptr =
-        (compound_bias && wl._biases) ? wl._biases->buffer().as<gna_compound_bias_t*>() : nullptr;
-
-    QuantizeWeights<WeightsType>(common_data,
-                                 wl._weights->buffer().as<float*>(),
-                                 int_weights->buffer(),
-                                 compound_bias_ptr,
-                                 quantized_weights);
-
-    wl._weights = int_weights;
-
     // Correcting precision for outdata
     wl.precision = weights_precision;
 }

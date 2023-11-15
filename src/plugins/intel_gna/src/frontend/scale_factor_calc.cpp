@@ -1194,7 +1194,7 @@ bool ScaleFactorCalculator::ScaleFactorPerLayerWeightable(InferenceEngine::Weigh
     if (!wl) {
         THROW_GNA_EXCEPTION << "Incorrect Weightable Layer pointer  \n";
     } else if (!wl->_weights) {
-        THROW_GNA_EXCEPTION << "Incorrect weight value for " << wl->name << ":" << wl->type << "\n";
+        //THROW_GNA_EXCEPTION << "Incorrect weight value for " << wl->name << ":" << wl->type << "\n";
     }
 
     auto quant = InferenceEngine::getInjectedData<QuantizedLayerParams>(*wl);
@@ -1238,11 +1238,15 @@ bool ScaleFactorCalculator::ScaleFactorPerLayerWeightable(InferenceEngine::Weigh
         } else {
             THROW_GNA_EXCEPTION << "Unsupported weights precision of: " << weights_prec.name();
         }
-        quant->_weights_quant.SetScale(ScaleFactorForQuantization(wl->_weights->buffer().as<float*>(),
-                                                                  static_cast<float>(scaleRange),
-                                                                  wl->_weights->size()));
-        if (quant->_weights_quant.GetScale() == -1.0f || (fake_quantized && LayerInfo(wl).isConcatAlignFilter())) {
+        if (!wl->_weights) {
             quant->_weights_quant.SetScale(1.0f);
+        } else {
+            quant->_weights_quant.SetScale(ScaleFactorForQuantization(wl->_weights->buffer().as<float*>(),
+                                                                      static_cast<float>(scaleRange),
+                                                                      wl->_weights->size()));
+            if (quant->_weights_quant.GetScale() == -1.0f || (fake_quantized && LayerInfo(wl).isConcatAlignFilter())) {
+                quant->_weights_quant.SetScale(1.0f);
+            }
         }
 
         if (wl->_biases) {
@@ -1297,7 +1301,14 @@ bool ScaleFactorCalculator::ScaleFactorPerLayerWeightable(InferenceEngine::Weigh
         }
     }
 
-    quant->_dst_quant.SetScale(quant->_weights_quant.GetScale() * quant->_src_quant.GetScale());
+    if (wl->_weights) {
+        quant->_dst_quant.SetScale(quant->_weights_quant.GetScale() * quant->_src_quant.GetScale());
+    } else {
+        auto in1 = InferenceEngine::CNNNetPrevLayer(wl, 1);
+        auto quant1 = InferenceEngine::getInjectedData<QuantizedLayerParams>(in1);
+        quant->_dst_quant.SetScale(quant1->_dst_quant.GetScale() * quant->_src_quant.GetScale());
+    }
+
     if (quant->_dst_quant.IsStatsSet()) {
         // Adjust weights scale factor if output values exceed int32 maximum value
 
