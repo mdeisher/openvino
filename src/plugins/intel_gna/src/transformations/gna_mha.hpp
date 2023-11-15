@@ -26,6 +26,18 @@ public:
     GnaMhaFqTransformation();
 };
 
+class GnaMhaQKVTransformation : public ov::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("GnaMhaQKVTransformation", "0");
+    GnaMhaQKVTransformation();
+};
+
+class GnaMhaQKVFqTransformation : public ov::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("GnaMhaQKVFqTransformation", "0");
+    GnaMhaQKVFqTransformation();
+};
+
 }  // namespace pass
 }  // namespace intel_gna
 }  // namespace ov
