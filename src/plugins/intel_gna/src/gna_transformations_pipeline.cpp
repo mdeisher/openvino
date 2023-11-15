@@ -190,6 +190,8 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     //manager.register_pass<ov::pass::Serialize>("before_post_proc.xml", "before_post_proc.bin");
     manager.register_pass<ov::intel_gna::pass::GnaMhaTransformation>();
     manager.register_pass<ov::intel_gna::pass::GnaMhaFqTransformation>();
+    manager.register_pass<ov::intel_gna::pass::GnaMhaQKVTransformation>();
+    manager.register_pass<ov::intel_gna::pass::GnaMhaQKVFqTransformation>();
     //manager.register_pass<ov::pass::Serialize>("after_mha.xml", "after_mha.bin");
     manager.register_pass<ngraph::pass::GnaMatMulDecomposition>();
     //manager.register_pass<ov::pass::Serialize>("after_matmul.xml", "after_matmul.bin");
