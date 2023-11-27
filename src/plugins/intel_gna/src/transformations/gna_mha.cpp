@@ -461,13 +461,41 @@ GnaMhaTransformation::GnaMhaTransformation() {
         auto new_concat4 = std::make_shared<Concat>(out_b, 0);
         auto new_reshape5 = std::make_shared<Reshape>(new_concat4->output(0),
             Constant::create(element::i64, Shape{2}, {C, H * H})->output(0),false);
-        auto new_transpose4 = std::make_shared<Transpose>(new_reshape5->output(0), Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
-        new_reshape5 = std::make_shared<Reshape>(new_transpose4->output(0),
-            Constant::create(element::i64, Shape{4}, {1ull, H * H, 1ull, C})->output(0),false);
-        std::vector<float> weight(C, 0.25f);
-        auto weight_const = Constant::create(ngraph::element::f32, Shape{1, 1, 1, C}, weight);
+        // this transpose is to work around GNA HW limitation where large W causes run out of internal buffer memory
+        auto new_transpose4 = std::make_shared<Transpose>(new_reshape5->output(0), 
+            Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
+#define PAR_CONV
+#define NUM_K 16
+#ifdef PAR_CONV
+        size_t num_K = NUM_K;
+        while (H * H % num_K != 0) {  // reduce parallelism if sizes don't match
+            num_K = num_K / 2;
+        }
+        if (num_K != NUM_K) {
+            printf("Warning:  failed to optimize reducesum\n");
+        }
+        // replace reducesum + multiply-by-1/C with multi-channel convolution
+        new_reshape5 = std::make_shared<Reshape>(
+            new_transpose4->output(0),
+            Constant::create(element::i64, Shape{4}, {1ull, H * H / num_K, C * num_K, 1ull})->output(0),false);
+        std::vector<float> weight(num_K * C * num_K, 0.0);
+        for (size_t i = 0; i < num_K; i++) {
+            for (size_t j = 0; j < C; j++) {
+                weight[i * num_K * C + i * C + j] = 1.0f / C;
+            }
+        }
+        auto weight_const = Constant::create(ngraph::element::f32, Shape{num_K, 1, C * num_K, 1}, weight);
         auto new_conv4 = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape5->output(0),weight_const->output(0), 
             Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
+#else
+        // replace reducesum + multiply-by-1/C with pointwise convolution and sum pool
+        new_reshape5 = std::make_shared<Reshape>(new_transpose4->output(0),
+            Constant::create(element::i64, Shape{4}, {1ull, H * H, C, 1ull})->output(0),false);
+        std::vector<float> weight(C, 1.0f / C);
+        auto weight_const = Constant::create(ngraph::element::f32, Shape{1, 1, C, 1}, weight);
+        auto new_conv4 = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape5->output(0),weight_const->output(0), 
+            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
+#endif
         auto new_reshape6 = std::make_shared<Reshape>(new_conv4->output(0), 
             Constant::create(element::i64, Shape{2}, {1ull, H * H})->output(0), false);
         replace_output_update_name(multiply3, new_reshape6);
