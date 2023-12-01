@@ -187,15 +187,16 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     }
 
     ////////////////////// GNA POST-PROCESSING /////////////////////////////
-    //manager.register_pass<ov::pass::Serialize>("before_post_proc.xml", "before_post_proc.bin");
+    manager.register_pass<ov::pass::Serialize>("before_post_proc.xml", "before_post_proc.bin");
     manager.register_pass<ov::intel_gna::pass::GnaMhaTransformation>();
     manager.register_pass<ov::intel_gna::pass::GnaMhaFqTransformation>();
     manager.register_pass<ov::intel_gna::pass::GnaMhaQKVTransformation>();
     manager.register_pass<ov::intel_gna::pass::GnaMhaQKVFqTransformation>();
-    //manager.register_pass<ov::pass::Serialize>("after_mha.xml", "after_mha.bin");
+    manager.register_pass<ov::pass::Serialize>("after_mha.xml", "after_mha.bin");
     manager.register_pass<ngraph::pass::GnaMatMulDecomposition>();
-    //manager.register_pass<ov::pass::Serialize>("after_matmul.xml", "after_matmul.bin");
-    manager.register_pass<ngraph::pass::GnaSoftmaxDecomposition>();
+    manager.register_pass<ov::pass::Serialize>("after_matmul.xml", "after_matmul.bin");
+    //manager.register_pass<ngraph::pass::GnaSoftmaxDecomposition>();
+    manager.register_pass<ngraph::pass::GnaSoftmaxParallelDecomposition>();
     manager.register_pass<ngraph::pass::GnaTransposeConvolutionPostDecomposition>();
     //manager.register_pass<ov::pass::Serialize>("after_tc.xml", "after_tc.bin");
     manager.register_pass<ov::intel_gna::pass::GnaReshapeFuse>();
@@ -256,7 +257,7 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
                                                                      {ov::element::u64, ov::element::i32},
                                                                      {ov::element::u32, ov::element::i32}});
 
-    //manager.register_pass<ov::pass::Serialize>("after_convert_prec.xml", "after_convert_prec.bin");
+    manager.register_pass<ov::pass::Serialize>("after_convert_prec.xml", "after_convert_prec.bin");
 
     const auto& pass_config = manager.get_pass_config();
 
