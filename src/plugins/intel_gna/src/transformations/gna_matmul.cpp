@@ -22,8 +22,13 @@
  */
 
 #include <memory>
-#include <ngraph/opsets/opset1.hpp>
 #include <ngraph/rt_info.hpp>
+#include "openvino/cc/ngraph/itt.hpp"
+#include <ngraph/opsets/opset1.hpp>
+#include "openvino/opsets/opset12.hpp"
+#include "openvino/pass/pattern/op/wrap_type.hpp"
+#include "openvino/pass/pattern/op/or.hpp"
+
 
 #include "gna_matmul.hpp"
 #include "gna_helper.hpp"
@@ -42,8 +47,8 @@ bool ngraph::pass::GnaMatMulDecomposition::run_on_model(const std::shared_ptr<ng
             continue;
         }
 
-        const Output<Node>& parent_a = matmul->input_value(0);
-        const Output<Node>& parent_b = matmul->input_value(1);
+        Output<Node>& parent_a = matmul->input_value(0);
+        Output<Node>& parent_b = matmul->input_value(1);
         auto const_a = std::dynamic_pointer_cast<ngraph::op::Constant>(parent_a.get_node()->shared_from_this());
         auto const_b = std::dynamic_pointer_cast<ngraph::op::Constant>(parent_b.get_node()->shared_from_this());
         auto transpose_a = matmul->get_transpose_a();
@@ -85,27 +90,24 @@ bool ngraph::pass::GnaMatMulDecomposition::run_on_model(const std::shared_ptr<ng
         } else if (N != 1) {
             continue;  // Batch case not yet implemented
         } else if (const_b != nullptr) {
-            continue;  // GNA plugin now implements big matmul as convolution when 2nd arg is constant
-        //} else if ((!transpose_a) && (parent_a_shape.size() == 2) && (parent_b_shape.size() == 2)) {  // use convolution for non-const 2D MatMul
 
-            // GNA PLUGIN SCALE FACTOR CALCULATION FAILS WHEN WEIGHTS ARE NOT CONST -- NEED TO FIX THAT FIRST
-
-            //auto new_reshape_a = std::make_shared<op::v1::Reshape>(parent_a,
-            //    op::Constant::create(ngraph::element::i64, Shape{4}, {1ull, parent_a_shape[0],parent_a_shape[1], 1ull})->output(0),false);
-            //auto new_transpose = std::make_shared<op::Transpose>(parent_b, 
-            //    op::Constant::create(element::Type_t::i64, Shape{2}, {1, 0}));
-            //auto new_reshape_b = std::make_shared<op::v1::Reshape>(new_transpose->output(0),
-            //    op::Constant::create(ngraph::element::i64, Shape{4}, {parent_b_shape[1],1ull,1ull,parent_b_shape[0]})->output(0),false);
-            //new_transpose = std::make_shared<op::Transpose>(new_reshape_a->output(0),
-            //    op::Constant::create(element::Type_t::i64, Shape{4}, {0, 3, 1, 2}));
-            //auto new_conv = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_transpose->output(0),
-            //    new_reshape_b->output(0),Strides{1, 1},CoordinateDiff{0, 0},CoordinateDiff{0, 0},Strides{1, 1},PadType::VALID);
-            //new_transpose= std::make_shared<op::Transpose>(new_conv->output(0),
-            //    op::Constant::create(element::Type_t::i64, Shape{4}, {0, 2, 3, 1}));
-            //auto new_reshape = std::make_shared<op::v1::Reshape>(new_transpose->output(0),
-            //    op::Constant::create(ngraph::element::i64, Shape{2}, {parent_a_shape[0],parent_b_shape[1]})->output(0),false);
-            //ngraph::replace_node(matmul, new_reshape);
-            //is_graph_modfied = true;
+            std::shared_ptr<ov::op::v1::Add> add = nullptr;
+            std::shared_ptr<ov::op::v0::Constant> bias = nullptr;
+            auto children = matmul->output(0).get_target_inputs();
+            if (children.size() == 1) {
+                add = std::dynamic_pointer_cast<ov::op::v1::Add>(children.begin()->get_node()->shared_from_this());
+                if (add) {
+                    bias = std::dynamic_pointer_cast<Constant>(add->input_value(0).get_node()->shared_from_this());
+                }
+            }
+            if (bias) {
+                auto new_matmul = InsertGnaMatMulAdd2D(parent_a, parent_b, bias->output(0), transpose_a, transpose_b, true);
+                replace_output_update_name(add, new_matmul);
+            } else {
+                auto new_matmul = InsertGnaMatMulAdd2D(parent_a, parent_b, transpose_a, transpose_b, true);
+                replace_output_update_name(matmul, new_matmul);
+            }
+            is_graph_modfied = true;
 
         } else {
 
@@ -393,3 +395,64 @@ bool ngraph::pass::GnaMatMulDecomposition::run_on_model(const std::shared_ptr<ng
     }
     return is_graph_modfied;
 }
+
+using namespace ov::pass;
+using namespace ov::intel_gna::pass;
+
+// Special matmul pattern in DPARN
+GnaMatmulDparnTransformation::GnaMatmulDparnTransformation() {
+    MATCHER_SCOPE(GnaMatmulDparnTransformation);
+
+    auto matmul_pattern_1 = ov::pass::pattern::wrap_type<ov::op::v0::MatMul>({ov::pass::pattern::any_input(), ov::pass::pattern::any_input()});
+    auto add_pattern_1 = ov::pass::pattern::wrap_type<ov::op::v1::Add>({ov::pass::pattern::any_input(), matmul_pattern_1});
+    auto reshape_pattern_1 = ov::pass::pattern::wrap_type<ov::op::v1::Reshape>({add_pattern_1, ov::pass::pattern::any_input()});
+    auto relu_pattern = ov::pass::pattern::wrap_type<ov::op::v0::Relu>({reshape_pattern_1});
+    auto reshape_pattern_2 = ov::pass::pattern::wrap_type<ov::op::v1::Reshape>({relu_pattern, ov::pass::pattern::any_input()});
+    auto matmul_pattern_2 = ov::pass::pattern::wrap_type<ov::op::v0::MatMul>({reshape_pattern_2, ov::pass::pattern::any_input()});
+    auto transpose_pattern = ov::pass::pattern::wrap_type<ov::op::v1::Transpose>({matmul_pattern_2, ov::pass::pattern::any_input()});
+    auto add_pattern_2 = ov::pass::pattern::wrap_type<ov::op::v1::Add>({ov::pass::pattern::any_input(), transpose_pattern});
+
+    ov::matcher_pass_callback callback = [=](ov::pass::pattern::Matcher& m) {
+        const auto& pattern_map = m.get_pattern_value_map();
+
+        auto matmul1_node = pattern_map.at(matmul_pattern_1).get_node_shared_ptr();
+        auto add1_node = pattern_map.at(add_pattern_1).get_node_shared_ptr();
+        auto matmul2_node = pattern_map.at(matmul_pattern_2).get_node_shared_ptr();
+        auto transpose = pattern_map.at(transpose_pattern).get_node_shared_ptr();
+        auto add2_node = pattern_map.at(add_pattern_2).get_node_shared_ptr();
+        
+        auto add1 = std::dynamic_pointer_cast<ov::op::v1::Add>(add1_node->shared_from_this());
+        auto add2 = std::dynamic_pointer_cast<ov::op::v1::Add>(add2_node->shared_from_this());
+        auto matmul1 = std::dynamic_pointer_cast<ov::op::v0::MatMul>(matmul1_node->shared_from_this());
+        auto matmul2 = std::dynamic_pointer_cast<ov::op::v0::MatMul>(matmul2_node->shared_from_this());
+        if ((matmul1 == nullptr) || (matmul2 == nullptr) || (add1 == nullptr) || (add2 == nullptr)) {
+            return false;
+        }
+
+        auto input = matmul1->input_value(0);
+        auto bias1 = std::dynamic_pointer_cast<Constant>(add1->input_value(0).get_node()->shared_from_this());
+        auto bias2 = std::dynamic_pointer_cast<Constant>(add2->input_value(0).get_node()->shared_from_this());
+        auto weights1 = std::dynamic_pointer_cast<Constant>(matmul1->input_value(1).get_node()->shared_from_this());
+        auto weights2 = std::dynamic_pointer_cast<Constant>(matmul2->input_value(1).get_node()->shared_from_this());
+        if ((bias1 == nullptr) || (bias2 == nullptr) || (weights1 == nullptr) || (weights2 == nullptr)) {
+            return false;
+        }
+        auto transpose_a = matmul1->get_transpose_a();
+        auto transpose_b = matmul1->get_transpose_b();
+        auto new_matmul1 = InsertGnaMatMulAdd2D(input, weights1->output(0), bias1->output(0), transpose_a, transpose_b, true);
+        auto new_relu = std::make_shared<ov::op::v0::Relu>(new_matmul1->output(0));
+        transpose_a = matmul2->get_transpose_a();
+        transpose_b = matmul2->get_transpose_b();
+        auto new_matmul2 = InsertGnaMatMulAdd2D(new_relu->output(0), weights2->output(0), bias2->output(0), transpose_a, transpose_b, true);
+        auto new_transpose = std::make_shared<Transpose>(new_matmul2->output(0), 
+            Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
+
+        replace_output_update_name(add2_node, new_transpose);
+
+        return true;
+    };
+    
+    auto m = std::make_shared<ov::pass::pattern::Matcher>(add_pattern_2, matcher_name);
+    this->register_matcher(m, callback);
+}
+
