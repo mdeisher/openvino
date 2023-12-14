@@ -1003,3 +1003,209 @@ std::shared_ptr<ov::op::v0::FakeQuantize> FindFqUpstream(const Output<Node>& par
     }
 }
 
+std::shared_ptr<ov::Node> GnaNewConvWeights(ov::Output<ov::Node>& B, bool transpose_b) {
+    std::shared_ptr<ov::Node> new_conv_weights = nullptr;
+    std::shared_ptr<ov::op::v0::Constant> weights_const = nullptr;
+    auto weights_fq = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(B.get_node_shared_ptr());
+    if (weights_fq) {
+        const ov::Output<ov::Node>& inputfq = weights_fq->input_value(0);
+        weights_const = std::dynamic_pointer_cast<ngraph::op::Constant>(inputfq.get_node()->shared_from_this());
+    } else {
+        weights_const = std::dynamic_pointer_cast<ngraph::op::Constant>(B.get_node_shared_ptr());
+    }
+    if (weights_const) {
+        auto weights_shape = weights_const->get_output_shape(0);
+        const float* weight_ptr = weights_const->get_data_ptr<float>();
+        std::vector<float> new_weights(weights_shape[0] * weights_shape[1], 0.0f);
+        float* new_weight_ptr = new_weights.data();
+        ov::Shape new_weights_shape;
+        if (transpose_b) {
+            // leave weights alone since transpose for MatMul and transpose for convolution cancel each other
+            new_weights_shape.push_back(weights_shape[0]);
+            new_weights_shape.push_back(1);
+            new_weights_shape.push_back(1);
+            new_weights_shape.push_back(weights_shape[1]);
+            memcpy(new_weight_ptr, weight_ptr, new_weights.size() * sizeof(float));
+        } else {
+            // transpose weight matrix
+            new_weights_shape.push_back(weights_shape[1]);
+            new_weights_shape.push_back(1);
+            new_weights_shape.push_back(1);
+            new_weights_shape.push_back(weights_shape[0]);
+            for (auto i = 0; i < weights_shape[0]; i++) {
+                for (auto j = 0; j < weights_shape[1]; j++) {
+                    new_weight_ptr[j * weights_shape[0] + i] = weight_ptr[i * weights_shape[1] + j];
+                }
+            }
+        }
+        auto new_weights_const = ov::op::v0::Constant::create(ngraph::element::f32, new_weights_shape, new_weights);
+        new_conv_weights = new_weights_const;
+        if (weights_fq) {
+            auto new_weights_fq = CopyFQ(new_weights_const->output(0), weights_fq);
+            new_conv_weights = new_weights_fq;
+        }
+    } else {
+        auto weights_shape = B.get_shape();
+        if (transpose_b) {
+            // no additional transpose since transpose for MatMul and transpose for convolution cancel each other
+            auto reshape = std::make_shared<ov::op::v1::Reshape>(B,
+                Constant::create(ov::element::i64, ov::Shape{4}, {weights_shape[0], 1ull, 1ull, weights_shape[1]})->output(0),false);
+            new_conv_weights = reshape;
+        } else {
+            // transpose weight tensor
+            auto transpose = std::make_shared<Transpose>(B, 
+                Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
+            auto reshape = std::make_shared<ov::op::v1::Reshape>(transpose->output(0), 
+                Constant::create(ov::element::i64, ov::Shape{4}, {weights_shape[1], 1ull, 1ull, weights_shape[0]})->output(0),false);
+            new_conv_weights = reshape;
+        }
+    }
+
+    return new_conv_weights;
+}
+
+std::shared_ptr<ov::Node> GnaNewConvBias(ov::Output<ov::Node>& C) {
+    std::shared_ptr<ov::Node> new_conv_bias = nullptr;
+    auto bias_fq = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(C.get_node_shared_ptr());
+    auto bias_const = std::dynamic_pointer_cast<ngraph::op::Constant>(C.get_node_shared_ptr());
+    if (bias_fq) {
+        bias_const = std::dynamic_pointer_cast<ngraph::op::Constant>(bias_fq->input_value(0).get_node_shared_ptr());
+    }
+    if (bias_const) {
+        auto bias_shape = bias_const->get_output_shape(0);
+        const float* bias_ptr = bias_const->get_data_ptr<float>();
+        size_t len = 1;
+        for (size_t i = 0; i < bias_shape.size(); i++) {
+            len *= bias_shape[i];
+        }
+        std::vector<float> new_bias(len, 0.0f);
+        float* new_bias_ptr = new_bias.data();
+        ov::Shape new_bias_shape;
+        new_bias_shape.push_back(1);
+        new_bias_shape.push_back(1);
+        new_bias_shape.push_back(1);
+        new_bias_shape.push_back(len);
+        memcpy(new_bias_ptr, bias_ptr, new_bias.size() * sizeof(float));
+        auto new_bias_const = ov::op::v0::Constant::create(ngraph::element::f32, new_bias_shape, new_bias);
+        new_conv_bias = new_bias_const;
+    } else {
+        auto C_shape = C.get_shape();
+        auto C_size = C_shape[0];
+        for (size_t i = 1; i < C_shape.size(); i++) {
+            C_size *= C_shape[i];
+        }
+        auto bias = (bias_fq) ? bias_fq->output(0) : C;
+        auto reshape = std::make_shared<ov::op::v1::Reshape>(bias,
+            Constant::create(ov::element::i64, ov::Shape{4}, {1ull, 1ull, 1ull, C_size})->output(0), false);
+        new_conv_bias = reshape;
+    }
+
+    return new_conv_bias;
+}
+
+// insert subgraph to perform A * B
+std::shared_ptr<ov::Node> InsertGnaMatMulAdd2D(ov::Output<ov::Node>& A, ov::Output<ov::Node>& B, bool transpose_a, bool transpose_b, bool out_2D) {
+    auto A_shape = A.get_shape();
+    auto B_shape = B.get_shape();
+    auto H = A_shape[0];
+    auto W = A_shape[1];
+    ov::Shape out_shape = {A_shape[0], B_shape[1]};
+    ov::Output<ov::Node> upstream = A;
+    if (transpose_b) out_shape[1] = B_shape[0];
+    if (transpose_a) {
+        auto transpose = std::make_shared<Transpose>(A, Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
+        upstream = transpose->output(0);
+        auto H = A_shape[0];
+        auto W = A_shape[1];
+        out_shape[0] = A_shape[1];
+    }
+    auto reshape = std::make_shared<ov::op::v1::Reshape>(upstream, Constant::create(ov::element::i64, ov::Shape{4}, {1ull, A_shape[0], 1ull, A_shape[1]})->output(0), false);
+    auto weights = GnaNewConvWeights(B, transpose_b);
+    auto conv = std::make_shared<ov::intel_gna::op::GNAConvolution>(reshape->output(0), weights->output(0),
+        ov::Strides{1, 1}, ov::CoordinateDiff{0, 0}, ov::CoordinateDiff{0, 0}, ov::Strides{1, 1}, ov::op::PadType::VALID );
+    if (out_2D) {
+        reshape = std::make_shared<ov::op::v1::Reshape>(conv->output(0), 
+            Constant::create(ov::element::i64, ov::Shape{2}, out_shape)->output(0), false);
+        return reshape;
+    } else {
+        return conv;
+    }
+}
+
+// insert subgraph to perform A * B + C
+std::shared_ptr<ov::Node> InsertGnaMatMulAdd2D(ov::Output<ov::Node>& A, ov::Output<ov::Node>& B, ov::Output<ov::Node>& C, bool transpose_a, bool transpose_b, bool out_2D) {
+    auto A_shape = A.get_shape();
+    auto B_shape = B.get_shape();
+    auto H = A_shape[0];
+    auto W = A_shape[1];
+    ov::Shape out_shape = {A_shape[0], B_shape[1]};
+    ov::Output<ov::Node> upstream = A;
+    if (transpose_b) out_shape[1] = B_shape[0];
+    if (transpose_a) {
+        auto transpose = std::make_shared<Transpose>(A, Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
+        upstream = transpose->output(0);
+        H = A_shape[1];
+        W = A_shape[0];
+        out_shape[0] = A_shape[1];
+    }
+    auto reshape = std::make_shared<ov::op::v1::Reshape>(upstream, Constant::create(ov::element::i64, ov::Shape{4}, {1ull, H, 1ull, W})->output(0), false);
+    auto weights = GnaNewConvWeights(B, transpose_b);
+    auto bias = GnaNewConvBias(C);
+    auto conv = std::make_shared<ov::intel_gna::op::GNAConvolution>(reshape->output(0), weights->output(0), bias->output(0),
+        ov::Strides{1, 1}, ov::CoordinateDiff{0, 0}, ov::CoordinateDiff{0, 0}, ov::Strides{1, 1}, ov::op::PadType::VALID );
+    if (out_2D) {
+        reshape = std::make_shared<ov::op::v1::Reshape>(conv->output(0), 
+            Constant::create(ov::element::i64, ov::Shape{2}, out_shape)->output(0), false);
+        return reshape;
+    } else {
+        return conv;
+    }
+}
+
+bool Is2DTranspose(std::shared_ptr<ov::op::v1::Transpose> transpose) {
+    bool is_2D = false;
+
+    if (transpose) {
+        auto input_shape = transpose->input_value(0).get_shape();
+        auto output_shape = transpose->output(0).get_shape();
+        const ov::Output<ov::Node>& transpose_order = transpose->input_value(1);
+        auto transpose_order_dim = transpose_order.get_shape().size();
+        if (transpose_order_dim == 1) {
+            auto const_with_order_values = std::dynamic_pointer_cast<ngraph::opset1::Constant>(transpose_order.get_node_shared_ptr());
+            if (const_with_order_values) {
+                std::vector<int64_t> order;
+                if (const_with_order_values->get_output_element_type(0) == ov::element::i8) {
+                    const int8_t* ptr_order = const_with_order_values->get_data_ptr<int8_t>();
+                    for (size_t i = 0; i < input_shape.size(); i++) {
+                        order.push_back(*(ptr_order + i));
+                    }
+                } else if (const_with_order_values->get_output_element_type(0) == ov::element::i32) {
+                    const int32_t* ptr_order = const_with_order_values->get_data_ptr<int32_t>();
+                    for (size_t i = 0; i < input_shape.size(); i++) {
+                        order.push_back(*(ptr_order + i));
+                    }
+                } else {
+                    const int64_t* ptr_order = const_with_order_values->get_data_ptr<int64_t>();
+                    for (size_t i = 0; i < input_shape.size(); i++) {
+                        order.push_back(*(ptr_order + i));
+                    }
+                }
+                std::vector<int64_t> squeezed_order;
+                int64_t count = 0;
+                for (size_t i = 0; i < order.size(); i++) {
+                    if (order[i] != i) {
+                        squeezed_order.push_back(order[i] - count);
+                    } else {
+                        count++;
+                    }
+                }
+                if ((squeezed_order.size() == 2) && (squeezed_order[0] == 1) && (squeezed_order[1] == 0)) {
+                    is_2D = true;
+                }
+            }
+        }
+    }
+
+    return is_2D;
+}
+

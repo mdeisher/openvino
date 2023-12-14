@@ -78,3 +78,8 @@ ov::Output<ov::Node> InsertOutputFQ(const ov::Output<ov::Node>& matmul_out, std:
 std::shared_ptr<ov::Node> InsertWeights(ov::Shape shape, std::vector<float> data, bool use_fq);
 std::shared_ptr<ov::Node> InsertWeights(ov::Shape shape, std::vector<float> data, bool use_fq, float min, float max);
 std::shared_ptr<ov::op::v0::FakeQuantize> FindFqUpstream(const ov::Output<ov::Node>& parent);
+std::shared_ptr<ov::Node> GnaNewConvWeights(ov::Output<ov::Node>& B, bool transpose_b);
+std::shared_ptr<ov::Node> GnaNewConvBias(ov::Output<ov::Node>& C);
+std::shared_ptr<ov::Node> InsertGnaMatMulAdd2D(ov::Output<ov::Node>& A, ov::Output<ov::Node>& B, bool transpose_a, bool transpose_b, bool out_2D);
+std::shared_ptr<ov::Node> InsertGnaMatMulAdd2D(ov::Output<ov::Node>& A, ov::Output<ov::Node>& B, ov::Output<ov::Node>& C, bool transpose_a, bool transpose_b, bool out_2D);
+bool Is2DTranspose(std::shared_ptr<ov::op::v1::Transpose> transpose);
