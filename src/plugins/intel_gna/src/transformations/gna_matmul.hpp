@@ -24,6 +24,7 @@
 #pragma once
 
 #include <transformations_visibility.hpp>
+#include "openvino/pass/graph_rewrite.hpp"
 
 #include "ngraph/ngraph.hpp"
 #include "ngraph/opsets/opset1.hpp"
@@ -46,3 +47,17 @@ public:
 
 }  // namespace pass
 }  // namespace ngraph
+
+namespace ov {
+namespace intel_gna {
+namespace pass {
+
+class GnaMatmulDparnTransformation : public ov::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("GnaMatmulDparnTransformation", "0");
+    GnaMatmulDparnTransformation();
+};
+
+}  // namespace pass
+}  // namespace intel_gna
+}  // namespace ov
