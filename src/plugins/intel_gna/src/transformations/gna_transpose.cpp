@@ -24,7 +24,7 @@
 #include <memory>
 #include <ngraph/opsets/opset1.hpp>
 #include <ngraph/rt_info.hpp>
-
+#include "gna_helper.hpp"
 #include "gna_transpose.hpp"
 
 using namespace ngraph;
@@ -361,6 +361,75 @@ bool ngraph::pass::GnaTransposeDecomposition::run_on_model(const std::shared_ptr
 
 
             }
+        }
+    }
+    return is_graph_modfied;
+}
+
+
+bool ngraph::pass::GnaCollapseTransposeDecomposition::run_on_model(const std::shared_ptr<ngraph::Function>& f) {
+    // Traverse nGraph Function in topological order
+    bool is_graph_modfied = false;
+    for (auto& node : f->get_ordered_ops()) {
+        auto transpose = std::dynamic_pointer_cast<Transpose>(node);
+        if (nullptr == transpose) {
+            continue;
+        }
+
+        const Output<Node>& parent = transpose->input_value(0);
+        auto input_shape = parent.get_shape();
+        auto output_shape = transpose->output(0).get_shape();
+        auto transpose_name = transpose->get_friendly_name();
+        const Output<Node>& transpose_order = transpose->input_value(1);
+        auto transpose_order_dim = transpose_order.get_shape().size();
+        if (transpose_order_dim != 1)
+            continue;
+        auto const_with_order_values =
+            std::dynamic_pointer_cast<ngraph::opset1::Constant>(transpose_order.get_node_shared_ptr());
+        if (!const_with_order_values)
+            continue;
+        std::vector<int64_t> order;
+        if (const_with_order_values->get_output_element_type(0) == ov::element::i8) {
+            const int8_t* ptr_order = const_with_order_values->get_data_ptr<int8_t>();
+            for (size_t i = 0; i < input_shape.size(); i++) {
+                order.push_back(*(ptr_order + i));
+            }
+        } else if (const_with_order_values->get_output_element_type(0) == ov::element::i32) {
+            const int32_t* ptr_order = const_with_order_values->get_data_ptr<int32_t>();
+            for (size_t i = 0; i < input_shape.size(); i++) {
+                order.push_back(*(ptr_order + i));
+            }
+        } else {
+            const int64_t* ptr_order = const_with_order_values->get_data_ptr<int64_t>();
+            for (size_t i = 0; i < input_shape.size(); i++) {
+                order.push_back(*(ptr_order + i));
+            }
+        }
+        if (input_shape.size() <= 2) {
+            continue;
+        }
+
+        ov::Shape new_shape, old_index;
+        for (auto i = 0; i < input_shape.size(); i++) {
+            if (input_shape[i] != 1) {
+                new_shape.push_back(input_shape[i]);
+                old_index.push_back(i);
+            }
+        }
+        std::vector<int64_t> new_order;
+        for (auto i = 0; i < new_shape.size(); i++) {
+            new_order.push_back(order[old_index[i]] - new_shape.size());
+        }
+
+        if ((new_shape.size() == 2) && (new_order[0] == 1) && (new_order[1] == 0)) {
+            auto new_reshape = std::make_shared<ngraph::opset1::Reshape>(parent,
+                op::Constant::create(ngraph::element::i64, Shape{new_shape.size()}, new_shape)->output(0),false);
+            auto new_transpose = std::make_shared<Transpose>(new_reshape->output(0), 
+                Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
+            new_reshape = std::make_shared<ngraph::opset1::Reshape>(new_transpose->output(0),
+                op::Constant::create(ngraph::element::i64, Shape{output_shape.size()}, output_shape)->output(0),false);
+            ngraph::replace_node_update_name(transpose, new_reshape);
+            is_graph_modfied = true;
         }
     }
     return is_graph_modfied;

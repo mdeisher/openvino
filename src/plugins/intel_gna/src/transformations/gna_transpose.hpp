@@ -43,5 +43,11 @@ public:
     bool run_on_model(const std::shared_ptr<ngraph::Function>& f) override;
 };
 
+class GnaCollapseTransposeDecomposition : public FunctionPass {
+public:
+    OPENVINO_RTTI("GnaCollapseTransposeDecomposition", "0");
+    bool run_on_model(const std::shared_ptr<ngraph::Function>& f) override;
+};
+
 }  // namespace pass
 }  // namespace ngraph
