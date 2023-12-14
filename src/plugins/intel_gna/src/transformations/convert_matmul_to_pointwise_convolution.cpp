@@ -35,9 +35,15 @@ static bool BiasValidation(const ngraph::Output<ngraph::Node>& output) {
 
 static std::tuple<bool, uint32_t, uint32_t, uint32_t> VerifyAndGetConvParams(
     std::shared_ptr<ngraph::Node> matmul_node) {
-    auto input1_shape = matmul_node->get_input_shape(0);
-    auto input2_shape = matmul_node->get_input_shape(1);
-    auto output_shape = matmul_node->get_output_shape(0);
+    auto matmul = std::dynamic_pointer_cast<ov::op::v0::MatMul>(matmul_node);
+    if (matmul == nullptr) {
+        return std::make_tuple(false, 0, 0, 0);
+    }
+    auto transpose_a = matmul->get_transpose_a();
+    auto transpose_b = matmul->get_transpose_b();
+    auto input1_shape = matmul->get_input_shape(0);
+    auto input2_shape = matmul->get_input_shape(1);
+    auto output_shape = matmul->get_output_shape(0);
     if (input1_shape.size() == 3 && input1_shape.front() == 1) {
         input1_shape.erase(std::begin(input1_shape));
     }
@@ -51,10 +57,11 @@ static std::tuple<bool, uint32_t, uint32_t, uint32_t> VerifyAndGetConvParams(
     }
 
     // Check if MatMul or corresponding pointwise convolution are supported by GNA
-    const uint32_t width = static_cast<uint32_t>(input1_shape.front());
-    const uint32_t in_channels = static_cast<uint32_t>(input2_shape.back());
-    const uint32_t out_channels = static_cast<uint32_t>(input2_shape.front());
-    if (input1_shape.front() <= Limitations::kAffineMaxBatchSize ||
+    const uint32_t width = (transpose_a) ? static_cast<uint32_t>(input1_shape[1]) : static_cast<uint32_t>(input1_shape[0]);
+    const uint32_t in_channels = (transpose_b) ? static_cast<uint32_t>(input2_shape[1]) : static_cast<uint32_t>(input2_shape[0]);
+    const uint32_t out_channels = (transpose_b) ? static_cast<uint32_t>(input2_shape[0]) : static_cast<uint32_t>(input2_shape[1]);
+    const uint32_t H = (transpose_a) ? static_cast<uint32_t>(input1_shape[1]) : static_cast<uint32_t>(input1_shape[0]);
+    if (H <= Limitations::kAffineMaxBatchSize ||
         out_channels % Limitations::kConvFiltersNumDivider != 0 || out_channels > Limitations::kConvMaxFiltersNum ||
         in_channels > Limitations::kConvFilterMaxSize) {
         return std::make_tuple(false, 0, 0, 0);
@@ -77,10 +84,26 @@ static bool Convert(std::shared_ptr<ngraph::Node> matmul_node,
     auto weights_node = matmul_node->input_value(1).get_node_shared_ptr();
     auto base_name = matmul_node->get_friendly_name();
 
+    auto matmul = std::dynamic_pointer_cast<ov::op::v0::MatMul>(matmul_node);
+    if (matmul == nullptr) {
+        return false;
+    }
+    auto transpose_a = matmul->get_transpose_a();
+    auto transpose_b = matmul->get_transpose_b();
+
+    ov::Output<ov::Node> upstream = input_node;
+    if (transpose_a) {
+        auto reshape = std::make_shared<ov::op::v1::Reshape>(input_node,
+            ov::op::v0::Constant::create(ngraph::element::i64, ov::Shape{2}, {in_channels,out_channels})->output(0),false);
+        auto transpose = std::make_shared<ov::op::v1::Transpose>(reshape->output(0),
+            ov::op::v0::Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1, 0}));
+        upstream = transpose->output(0);
+    }
+
     auto reshape_const_before = std::make_shared<ngraph::opset7::Constant>(ngraph::element::Type_t::i64,
                                                                            ngraph::Shape{4},
                                                                            ngraph::Shape{1, 1, width, in_channels});
-    auto reshape_before = std::make_shared<ngraph::opset7::Reshape>(input_node, reshape_const_before, false);
+    auto reshape_before = std::make_shared<ngraph::opset7::Reshape>(upstream, reshape_const_before, false);
     reshape_before->set_friendly_name(base_name + "/reshape_in");
     ngraph::copy_runtime_info(input_node, reshape_before);
 
@@ -93,8 +116,13 @@ static bool Convert(std::shared_ptr<ngraph::Node> matmul_node,
     transpose_before->set_friendly_name(base_name + "/transpose_in");
     ngraph::copy_runtime_info(matmul_node, transpose_before);
 
-    auto weights_reshape_const =
-        std::make_shared<ngraph::opset7::Constant>(ngraph::element::Type_t::i64,
+    if (!transpose_b) {
+        // need to transpose weight matrix here
+        printf("Case not implemented in convert_matmul_to_pointwise_convolution Convert!\n");
+        return false;
+    }
+
+    auto weights_reshape_const = std::make_shared<ngraph::opset7::Constant>(ngraph::element::Type_t::i64,
                                                    ngraph::Shape{4},
                                                    ngraph::Shape{out_channels, in_channels, 1, 1});
     auto weights_reshaped = std::make_shared<ngraph::opset7::Reshape>(weights_node, weights_reshape_const, false);
