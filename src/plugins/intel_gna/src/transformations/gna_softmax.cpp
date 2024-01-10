@@ -58,7 +58,7 @@ size_t ShapeSize(ov::Shape shape) {
 ov::Output<ov::Node> MakeWeights(ov::Shape shape, std::vector<float> weights, float val, bool use_fq) {
     auto weights_const = op::Constant::create(ngraph::element::f32, shape, weights);
     if (use_fq) {
-        auto fq = InsertFQ(weights_const->output(0), val);
+        auto fq = InsertFQ(weights_const->output(0), fabs(val));
         return fq->output(0);
     } else {
         return weights_const->output(0);
