@@ -76,6 +76,23 @@ bool ngraph::pass::GnaMatMulDecomposition::run_on_model(const std::shared_ptr<ng
             }
         }
 
+        std::shared_ptr<FakeQuantize> const_a_fq = nullptr;
+        if (const_a == nullptr) {
+            const_a_fq = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(parent_a.get_node()->shared_from_this());
+            if (const_a_fq) {
+                const_a = std::dynamic_pointer_cast<ngraph::op::Constant>(const_a_fq->input_value(0).get_node()->shared_from_this());
+            }
+        }
+
+        std::shared_ptr<FakeQuantize> const_b_fq = nullptr;
+        if (const_b == nullptr) {
+            const_b_fq = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(parent_b.get_node()->shared_from_this());
+            if (const_b_fq) {
+                const_b = std::dynamic_pointer_cast<ngraph::op::Constant>(
+                    const_b_fq->input_value(0).get_node()->shared_from_this());
+            }
+        }
+
         std::shared_ptr<FakeQuantize> fq_after = nullptr;
         auto children = matmul->output(0).get_target_inputs();
         for (auto child : children) {
