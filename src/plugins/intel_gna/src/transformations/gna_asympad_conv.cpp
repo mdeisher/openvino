@@ -88,13 +88,24 @@ static std::shared_ptr<ov::Node> modify_padding(std::shared_ptr<ov::intel_gna::o
     trimm_padding(pads_begin, pads_end);
 
     if (nullptr != conv) {
-        return std::make_shared<ov::intel_gna::op::GNAConvolution>(input,
-                                                                   conv->input_value(1),
-                                                                   conv->get_strides(),
-                                                                   pads_begin,
-                                                                   pads_end,
-                                                                   conv->get_dilations(),
-                                                                   conv->get_auto_pad());
+        if (conv->inputs().size() == 2) {
+            return std::make_shared<ov::intel_gna::op::GNAConvolution>(input,
+                                                                       conv->input_value(1),
+                                                                       conv->get_strides(),
+                                                                       pads_begin,
+                                                                       pads_end,
+                                                                       conv->get_dilations(),
+                                                                       conv->get_auto_pad());
+        } else {
+            return std::make_shared<ov::intel_gna::op::GNAConvolution>(input,
+                                                                       conv->input_value(1),
+                                                                       conv->input_value(2),
+                                                                       conv->get_strides(),
+                                                                       pads_begin,
+                                                                       pads_end,
+                                                                       conv->get_dilations(),
+                                                                       conv->get_auto_pad());
+        }
     }
 
     return nullptr;
@@ -137,10 +148,31 @@ static ov::Output<ov::Node> postcrop_validate_transpose(ov::Output<ov::Node> inp
     return new_slice->output(0);
 }
 
+static std::shared_ptr<ov::Node> insert_padding_fq(const ov::Output<ov::Node> &parent) {
+    size_t levels = 65535;  // value used by POT 2023.0.1 when quantizing a zero const
+    auto auto_broadcast = ov::op::AutoBroadcastType::NUMPY;
+    auto fq_dim = parent.get_shape().size();
+    auto fq_shape = (fq_dim == 1) ? ov::Shape{1} : ((fq_dim==2) ? ov::Shape{1,1} : ((fq_dim==3) ? ov::Shape{1,1,1} : ov::Shape{1,1,1,1}));
+    auto fq_type = parent.get_element_type();
+    auto input_low_data = -0.00007999999797903001f;  // value used by POT 2023.0.1 when quantizing a zero const
+    auto input_high_data = 0.00007999999797903001f;  // value used by POT 2023.0.1 when quantizing a zero const
+    auto output_low_data = -0.00007999999797903001f;  // value used by POT 2023.0.1 when quantizing a zero const
+    auto output_high_data = 0.00007999999797903001f;  // value used by POT 2023.0.1 when quantizing a zero const
+    auto input_low = std::make_shared<ngraph::op::Constant>(fq_type, fq_shape, input_low_data);
+    auto input_high = std::make_shared<ngraph::op::Constant>(fq_type, fq_shape, input_high_data);
+    auto output_low = std::make_shared<ngraph::op::Constant>(fq_type, fq_shape, output_low_data);
+    auto output_high = std::make_shared<ngraph::op::Constant>(fq_type, fq_shape, output_high_data);
+    auto fq = std::make_shared<ngraph::op::FakeQuantize>(parent, input_low->output(0), input_high->output(0), 
+        output_low->output(0), output_high->output(0), levels, auto_broadcast);
+
+    return fq;
+}
+
 static ov::Output<ov::Node> decompose_height(ov::Output<ov::Node> input,
                                              ov::CoordinateDiff pads_begin,
                                              ov::CoordinateDiff pads_end,
-                                             ov::Shape conv_input_shape) {
+                                             ov::Shape conv_input_shape,
+                                             bool use_fq) {
     uint64_t height_begin, height_end, height_padding, width_padding;
     std::tie(height_begin, height_end, height_padding) = extract_height_padding(pads_begin, pads_end);
     width_padding = std::abs(pads_end[1] - pads_begin[1]);
@@ -152,7 +184,13 @@ static ov::Output<ov::Node> decompose_height(ov::Output<ov::Node> input,
 
     auto new_reshape = create_reshape(input, 2, ov::Shape{H, W * C});
     auto padding_const = create_zero_const(ov::Shape{height_padding, W * C});
-    auto new_concat = concatenate_zeros(height_begin, height_end, padding_const, new_reshape);
+    std::shared_ptr<ov::op::v0::Concat> new_concat = nullptr;
+    if (use_fq) {
+        auto new_fq = insert_padding_fq(padding_const->output(0));
+        new_concat = concatenate_zeros(height_begin, height_end, new_fq, new_reshape);
+    } else {
+        new_concat = concatenate_zeros(height_begin, height_end, padding_const, new_reshape);
+    }
 
     if (0 == width_padding)
         return create_reshape(new_concat->output(0), 4, ov::Shape{N, H + height_padding, W, C})->output(0);
@@ -162,7 +200,8 @@ static ov::Output<ov::Node> decompose_height(ov::Output<ov::Node> input,
 static ov::Output<ov::Node> decompose_width(ov::Output<ov::Node> input,
                                             ov::CoordinateDiff pads_begin,
                                             ov::CoordinateDiff pads_end,
-                                            ov::Shape conv_input_shape) {
+                                            ov::Shape conv_input_shape,
+                                            bool use_fq) {
     uint64_t width_begin, width_end, width_padding, height_padding;
     std::tie(width_begin, width_end, width_padding) = extract_width_padding(pads_begin, pads_end);
     height_padding = std::abs(pads_end[0] - pads_begin[0]);
@@ -194,7 +233,13 @@ static ov::Output<ov::Node> decompose_width(ov::Output<ov::Node> input,
                   second_dim + (second_dim % transpose_validate_factor
                                     ? transpose_validate_factor - second_dim % transpose_validate_factor
                                     : 0)});
-    auto new_concat = concatenate_zeros(width_begin, width_end, padding_const, new_transpose);
+    std::shared_ptr<ov::op::v0::Concat> new_concat = nullptr;
+    if (use_fq) {
+        auto new_fq = insert_padding_fq(padding_const->output(0));
+        auto new_concat = concatenate_zeros(width_begin, width_end, new_fq, new_transpose);
+    } else {
+        new_concat = concatenate_zeros(width_begin, width_end, padding_const, new_transpose);
+    }
     auto new_untranspose = create_2d_transpose(new_concat->output(0));
     auto trsp_output = postcrop_validate_transpose(new_untranspose->output(0),
                                                    ov::Shape{(H + height_padding), (W + width_padding) * C},
@@ -220,8 +265,13 @@ static bool decompose(std::shared_ptr<ov::intel_gna::op::GNAConvolution> conv) {
     if (input_shape.size() != 4 || input_shape[0] != 1)
         return false;
 
-    Output<Node> skip_input_H_const = decompose_height(input, pads_begin, pads_end, input_shape);
-    Output<Node> skip_input_W_const = decompose_width(skip_input_H_const, pads_begin, pads_end, input_shape);
+    auto weights_fq = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(conv->input_value(1).get_node_shared_ptr());
+    auto children = conv->output(0).get_target_inputs();
+    auto conv_fq = std::dynamic_pointer_cast<ngraph::op::FakeQuantize>(conv->output(0).get_node_shared_ptr());
+    bool use_fq = (weights_fq != nullptr) || (conv_fq != nullptr);
+
+    Output<Node> skip_input_H_const = decompose_height(input, pads_begin, pads_end, input_shape, use_fq);
+    Output<Node> skip_input_W_const = decompose_width(skip_input_H_const, pads_begin, pads_end, input_shape, use_fq);
 
     auto new_conv = modify_padding(conv, skip_input_W_const, pads_begin, pads_end);
     if (new_conv == nullptr)
