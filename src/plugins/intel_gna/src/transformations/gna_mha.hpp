@@ -44,10 +44,22 @@ public:
     GnaMhaSelfTransformation();
 };
 
+class GnaMhaSelfFqTransformation : public ov::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("GnaMhaSelfFqTransformation", "0");
+    GnaMhaSelfFqTransformation();
+};
+
 class GnaMhaSplitSelfTransformation : public ov::pass::MatcherPass {
 public:
     OPENVINO_RTTI("GnaMhaSplitSelfTransformation", "0");
     GnaMhaSplitSelfTransformation();
+};
+
+class GnaMhaSplitSelfFqTransformation : public ov::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("GnaMhaSplitSelfFqTransformation", "0");
+    GnaMhaSplitSelfFqTransformation();
 };
 
 }  // namespace pass
