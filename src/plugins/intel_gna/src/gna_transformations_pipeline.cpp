@@ -91,6 +91,7 @@
 #include "transformations/gna_transconv2d1d.hpp"
 #include "transformations/gna_transconv_before.hpp"
 #include "transformations/gna_transconv_after.hpp"
+#include "transformations/gna_transgather.hpp"
 #include "transformations/gna_transpose.hpp"
 
 using namespace ov;
@@ -121,16 +122,18 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
 
 //has_convolution = true;
     //////////////////////////////// GNA PRE-PROCESSING ////////////////////////////
-    manager.register_pass<ov::pass::Serialize>("before_pre_proc.xml", "before_post_proc.bin");
+    //manager.register_pass<ov::pass::Serialize>("before_pre_proc.xml", "before_post_proc.bin");
     manager.register_pass<ngraph::pass::GnaBinaryFqFix>();
     //manager.register_pass<ngraph::pass::GnaToMvn>();
     //manager.register_pass<ngraph::pass::GnaCustomToMvn>();
+    manager.register_pass<ov::intel_gna::pass::GnaTransGatherTransformation>();
+    //manager.register_pass<ov::pass::Serialize>("after_transgather.xml", "after_transgather.bin");
     manager.register_pass<ngraph::pass::GnaMvnDecomposition>();
     manager.register_pass<ov::intel_gna::pass::GnaDparnTransformation>();
     manager.register_pass<ngraph::pass::GnaTransposeConvolution2d1dDecomposition>();
     manager.register_pass<ngraph::pass::GnaTransposeConvolutionPreDecomposition>();
     manager.register_pass<ngraph::pass::GnaPadConvolutionDecomposition>();
-    manager.register_pass<ov::pass::Serialize>("after_pre_proc.xml", "before_post_proc.bin");
+    //manager.register_pass<ov::pass::Serialize>("after_pre_proc.xml", "before_post_proc.bin");
     /////////////////////////////////////////////////////////////////////////////////
 
     manager.register_pass<ov::pass::ConvertMVN1ToMVN6>();
@@ -146,11 +149,11 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     manager.register_pass<ov::intel_gna::pass::Decompose2DConvTransposedWithBiasAF>(config.gnaPrecision);
     manager.register_pass<ov::intel_gna::pass::Decompose2DConvTransposedWithBias>(config.gnaPrecision);
     manager.register_pass<ov::intel_gna::pass::Decompose2DConv>(config.gnaPrecision);
-    //if (!has_convolution) {
+    if (!has_convolution) {
         manager.register_pass<ov::intel_gna::pass::ConvertMatmulWithFqToPointWiseConvolution>();
         manager.register_pass<ov::intel_gna::pass::ConvertMatmulWithBiasToPointWiseConvolution>();
         manager.register_pass<ov::intel_gna::pass::ConvertMatmulToPointWiseConvolution>();
-    //}
+    }
     manager.register_pass<ov::intel_gna::pass::SplitConvolutionWithFq>();
     manager.register_pass<ov::intel_gna::pass::SplitConvolutionWithBias>();
     manager.register_pass<ov::intel_gna::pass::SplitConvolution>();
@@ -188,27 +191,28 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     }
 
     ////////////////////// GNA POST-PROCESSING /////////////////////////////
-    manager.register_pass<ov::pass::Serialize>("before_post_proc.xml", "before_post_proc.bin");
+    //manager.register_pass<ov::pass::Serialize>("before_post_proc.xml", "before_post_proc.bin");
     manager.register_pass<ov::intel_gna::pass::GnaNormTransformation>();
-    manager.register_pass<ov::pass::Serialize>("before_mha_split.xml", "before_mha_split.bin");
+    //manager.register_pass<ov::pass::Serialize>("before_mha_split.xml", "before_mha_split.bin");
     manager.register_pass<ov::intel_gna::pass::GnaMhaSplitSelfTransformation>();
-    manager.register_pass<ov::pass::Serialize>("before_mha.xml", "before_mha.bin");
+    manager.register_pass<ov::intel_gna::pass::GnaMhaSplitSelfFqTransformation>();
+    //manager.register_pass<ov::pass::Serialize>("before_mha.xml", "before_mha.bin");
     manager.register_pass<ov::intel_gna::pass::GnaMhaTransformation>();
     manager.register_pass<ov::intel_gna::pass::GnaMhaSelfTransformation>();
     manager.register_pass<ov::intel_gna::pass::GnaMhaFqTransformation>();
-    manager.register_pass<ov::pass::Serialize>("after_mha.xml", "after_mha.bin");
+    //manager.register_pass<ov::pass::Serialize>("after_mha.xml", "after_mha.bin");
     manager.register_pass<ov::intel_gna::pass::GnaMatmulDparnTransformation>();
     manager.register_pass<ngraph::pass::GnaMatMulDecomposition>();
-    manager.register_pass<ov::pass::Serialize>("after_matmul.xml", "after_matmul.bin");
+    //manager.register_pass<ov::pass::Serialize>("after_matmul.xml", "after_matmul.bin");
     //manager.register_pass<ngraph::pass::GnaSoftmaxDecomposition>();
     manager.register_pass<ngraph::pass::GnaSoftmaxParallelDecomposition>();
     manager.register_pass<ngraph::pass::GnaTransposeConvolutionPostDecomposition>();
     //manager.register_pass<ov::pass::Serialize>("after_tc.xml", "after_tc.bin");
     manager.register_pass<ov::intel_gna::pass::GnaReshapeFuse>();
-    //manager.register_pass<ov::pass::Serialize>("after_rr.xml", "after_rr.bin");
     manager.register_pass<ov::pass::transpose_sinking::TSFuse>();
-    // manager.register_pass<ov::pass::GnaLstmDecomposition>();
+    //manager.register_pass<ov::pass::GnaLstmDecomposition>();
     manager.register_pass<ov::intel_gna::pass::GnaAsymPadConvDecomposition>();
+    //manager.register_pass<ov::pass::Serialize>("after_asympad.xml", "after_asympad.bin");
     has_slice = true;
     manager.register_pass<ngraph::pass::GnaConcatDecomposition>();
     manager.register_pass<ngraph::pass::GnaCollapseTransposeDecomposition>();
@@ -263,7 +267,7 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
                                                                      {ov::element::u64, ov::element::i32},
                                                                      {ov::element::u32, ov::element::i32}});
 
-    manager.register_pass<ov::pass::Serialize>("after_convert_prec.xml", "after_convert_prec.bin");
+    //manager.register_pass<ov::pass::Serialize>("after_convert_prec.xml", "after_convert_prec.bin");
 
     const auto& pass_config = manager.get_pass_config();
 
