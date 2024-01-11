@@ -47,6 +47,7 @@ GnaNormTransformation::GnaNormTransformation() {
 
     ov::matcher_pass_callback callback = [=](pattern::Matcher& m) {
         const auto& pattern_map = m.get_pattern_value_map();
+        bool use_fq = false;
 
         auto reshape2 = pattern_map.at(reshape2_pattern).get_node_shared_ptr();
         auto reducemean = reshape2->input_value(0).get_node_shared_ptr();
@@ -60,6 +61,7 @@ GnaNormTransformation::GnaNormTransformation() {
         if (reshapefq) {
             children = reshapefq->output(0).get_target_inputs();
             multiply1 = std::dynamic_pointer_cast<Multiply>(children.begin()->get_node()->shared_from_this());
+            use_fq = true;
         }
         auto add = pattern_map.at(add_pattern).get_node_shared_ptr();
         children = add->output(0).get_target_inputs();
@@ -67,6 +69,7 @@ GnaNormTransformation::GnaNormTransformation() {
         std::shared_ptr<ov::op::v1::Multiply> multiply = nullptr;
         if (addfq) {
             children = addfq->output(0).get_target_inputs();
+            use_fq = true;
         } else {
             children = add->output(0).get_target_inputs();
         }
@@ -76,6 +79,7 @@ GnaNormTransformation::GnaNormTransformation() {
         auto transpose_in = std::dynamic_pointer_cast<Transpose>(reducemean->input_value(0).get_node_shared_ptr());
         if (multiplyfq) {
             children = multiplyfq->output(0).get_target_inputs();
+            use_fq = true;
         }
         auto transpose_out = std::dynamic_pointer_cast<Transpose>(children.begin()->get_node()->shared_from_this());
         ov::Shape transpose_out_shape;
@@ -102,6 +106,7 @@ GnaNormTransformation::GnaNormTransformation() {
         auto multiply_const_fq = std::dynamic_pointer_cast<FakeQuantize>(multiply->input_value(1).get_node_shared_ptr());
         if (multiply_const_fq) {
             multiply_const = std::dynamic_pointer_cast<Constant>(multiply_const_fq->input_value(0).get_node_shared_ptr());
+            use_fq = true;
         }
         if (multiply_const == nullptr) {
             return false;
@@ -153,8 +158,8 @@ GnaNormTransformation::GnaNormTransformation() {
             for (size_t i = 0; i < new_shape[0]; i++) {
                 avg_broadcast[i * N] = 1.0f;
             }
-            auto avg_weights_const = Constant::create(ngraph::element::f32, Shape{N, H, 1, C}, avg_weights);
-            auto avg_broadcast_const = Constant::create(ngraph::element::f32, Shape{new_shape[0], 1, 1, N}, avg_broadcast);
+            auto avg_weights_const = InsertWeights(Shape{N, H, 1, C}, avg_weights, use_fq);
+            auto avg_broadcast_const = InsertWeights(Shape{new_shape[0], 1, 1, N}, avg_broadcast, use_fq);
 
             auto reshape_4d = std::make_shared<Reshape>(parent,
                 Constant::create(ngraph::element::i64, Shape{4}, {1ull, H, 1ull, C})->output(0),false);
@@ -220,13 +225,11 @@ GnaNormTransformation::GnaNormTransformation() {
             } else if (multiply_out_shape.size() == 3) {
                 reshape = std::make_shared<ov::op::v1::Reshape>(subtract_mean->output(0), 
                     Constant::create(element::i64, Shape{3}, {multiply_out_shape[0], multiply_out_shape[1],multiply_out_shape[2]})->output(0),false);
-                //replace_node(multiply, reshape);
-replace_node(multiplyfq, reshape_sum);
+                replace_node(multiply, reshape);
             } else {
                 reshape = std::make_shared<ov::op::v1::Reshape>(subtract_mean->output(0), 
                     Constant::create(element::i64, Shape{4}, {multiply_out_shape[0], multiply_out_shape[1],multiply_out_shape[2],multiply_out_shape[3]})->output(0),false);
-                //replace_node(multiply, reshape);
-replace_node(multiplyfq, reshape_sum);
+                replace_node(multiply, reshape);
             }
             return true;
         
