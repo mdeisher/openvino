@@ -122,7 +122,7 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
 
 //has_convolution = true;
     //////////////////////////////// GNA PRE-PROCESSING ////////////////////////////
-    //manager.register_pass<ov::pass::Serialize>("before_pre_proc.xml", "before_post_proc.bin");
+    manager.register_pass<ov::pass::Serialize>("before_pre_proc.xml", "before_post_proc.bin");
     manager.register_pass<ngraph::pass::GnaBinaryFqFix>();
     //manager.register_pass<ngraph::pass::GnaToMvn>();
     //manager.register_pass<ngraph::pass::GnaCustomToMvn>();
@@ -133,7 +133,7 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     manager.register_pass<ngraph::pass::GnaTransposeConvolution2d1dDecomposition>();
     manager.register_pass<ngraph::pass::GnaTransposeConvolutionPreDecomposition>();
     manager.register_pass<ngraph::pass::GnaPadConvolutionDecomposition>();
-    //manager.register_pass<ov::pass::Serialize>("after_pre_proc.xml", "before_post_proc.bin");
+    manager.register_pass<ov::pass::Serialize>("after_pre_proc.xml", "before_post_proc.bin");
     /////////////////////////////////////////////////////////////////////////////////
 
     manager.register_pass<ov::pass::ConvertMVN1ToMVN6>();
@@ -149,11 +149,11 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     manager.register_pass<ov::intel_gna::pass::Decompose2DConvTransposedWithBiasAF>(config.gnaPrecision);
     manager.register_pass<ov::intel_gna::pass::Decompose2DConvTransposedWithBias>(config.gnaPrecision);
     manager.register_pass<ov::intel_gna::pass::Decompose2DConv>(config.gnaPrecision);
-    if (!has_convolution) {
+    //if (!has_convolution) {
         manager.register_pass<ov::intel_gna::pass::ConvertMatmulWithFqToPointWiseConvolution>();
         manager.register_pass<ov::intel_gna::pass::ConvertMatmulWithBiasToPointWiseConvolution>();
         manager.register_pass<ov::intel_gna::pass::ConvertMatmulToPointWiseConvolution>();
-    }
+    //}
     manager.register_pass<ov::intel_gna::pass::SplitConvolutionWithFq>();
     manager.register_pass<ov::intel_gna::pass::SplitConvolutionWithBias>();
     manager.register_pass<ov::intel_gna::pass::SplitConvolution>();
@@ -191,7 +191,7 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     }
 
     ////////////////////// GNA POST-PROCESSING /////////////////////////////
-    //manager.register_pass<ov::pass::Serialize>("before_post_proc.xml", "before_post_proc.bin");
+    manager.register_pass<ov::pass::Serialize>("before_post_proc.xml", "before_post_proc.bin");
     manager.register_pass<ov::intel_gna::pass::GnaNormTransformation>();
     //manager.register_pass<ov::pass::Serialize>("before_mha_split.xml", "before_mha_split.bin");
     manager.register_pass<ov::intel_gna::pass::GnaMhaSplitSelfTransformation>();
@@ -217,7 +217,7 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     manager.register_pass<ngraph::pass::GnaConcatDecomposition>();
     manager.register_pass<ngraph::pass::GnaCollapseTransposeDecomposition>();
     manager.register_pass<ngraph::pass::GnaTransposeDecomposition>();
-    //manager.register_pass<ov::pass::Serialize>("after_post_proc.xml", "after_post_proc.bin");
+    manager.register_pass<ov::pass::Serialize>("after_post_proc.xml", "after_post_proc.bin");
     //////////////////////////////////////////////////////////////////////////
 
     manager.register_pass<ov::intel_gna::pass::RemoveInputsProcessing>(input_output_subgraphs);
@@ -267,7 +267,7 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
                                                                      {ov::element::u64, ov::element::i32},
                                                                      {ov::element::u32, ov::element::i32}});
 
-    //manager.register_pass<ov::pass::Serialize>("after_convert_prec.xml", "after_convert_prec.bin");
+    manager.register_pass<ov::pass::Serialize>("after_convert_prec.xml", "after_convert_prec.bin");
 
     const auto& pass_config = manager.get_pass_config();
 
