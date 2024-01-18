@@ -1003,7 +1003,8 @@ RequestStatus GNAPlugin::WaitFor(uint32_t request_idx, int64_t millisTimeout) {
         auto is1D = output_layout == InferenceEngine::Layout::C;
         auto isScalar = output_layout == InferenceEngine::Layout::SCALAR;
         auto is3D = output_layout == InferenceEngine::Layout::CHW;
-        size_t batchSize = (is1D || isScalar || is3D) ? 1 : dims[0];
+        //size_t batchSize = (is1D || isScalar || is3D) ? 1 : dims[0];
+        size_t batchSize = (is1D || isScalar) ? 1 : dims[0];
         size_t elementsPerBatch =
             isScalar ? 1 : (is1D ? dims.front() : details::product(++std::begin(dims), std::end(dims)));
 

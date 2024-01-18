@@ -30,6 +30,8 @@
 #include "serial/headers/2dot8/gna_model_header.hpp"
 #include "serial/headers/2dot9/gna_model_header.hpp"
 #include "serial/headers/latest/gna_model_header.hpp"
+//#include "gna2_to_ir.hpp"
+#include "gna2_profile.hpp"
 
 using namespace ov::intel_gna;
 
@@ -428,6 +430,11 @@ void GNAModelSerial::Export(const GnaAllocations& allocations, std::ostream& os)
     const std::vector<Gna2Operation> layers(gna2model_->Operations,
                                             gna2model_->Operations + gna2model_->NumberOfOperations);
 
+    //auto inputs = inputs_.Get()[0].ptrs;
+    //GnaWriteXml("gna_graph.xml", *gna2model_, inputs);
+
+    GnaProfiler(gna2model_);
+
     const auto gnaGraphSize = allocations.GetSizeForExport();
     const auto& allocationsOrdered = allocations.GetAllocationsInExportOrder();
 
@@ -530,12 +537,19 @@ void GNAModelSerial::Export(const GnaAllocations& allocations, std::ostream& os)
     for (const auto& layer : layers) {
         writeBits(static_cast<uint32_t>(layer.Type), os);
         writeBits(layer.NumberOfOperands, os);
+        printf("writing layer type %d with %d operands %d parameters\n", layer.Type, layer.NumberOfOperands, layer.NumberOfParameters);
 
         for (uint32_t i = 0; i < layer.NumberOfOperands; i++) {
             if (layer.Operands[i] == nullptr) {
                 writeBits(Gna2Tensor{}, os);
             } else {
                 Gna2Tensor tensor = getTensorWithProperOffset(*layer.Operands[i]);
+                printf("  tensor %d (", i);
+                for (uint32_t j = 0; j < tensor.Shape.NumberOfDimensions; j++) {
+                    printf("%d,", tensor.Shape.Dimensions[j]);
+                }
+                printf(")\n");
+
                 // we need to remove legacy (up to & including GNA HW 2.0) CNN enforement during export
                 // to avoid issues when importing and running the model on newer GNA HW with libGNA 2.1.x.y
                 if (i == OutOpIdx && layer.Type == Gna2OperationTypeConvolution) {

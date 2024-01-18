@@ -897,20 +897,20 @@ bool Limitations::is_concat_supported(const std::shared_ptr<const ov::Node>& nod
     bool is_supported = false;
     if (skipped_ops_count == concat_node->inputs().size()) {
         is_supported = true;
-    } else if (is_interleaved) {
-        // TODO: need to extend interleaved layers detection patterns when migration to ngraph is finished.
-        // make interleaved shape
-        ov::Shape tr_shape(concat_shape_out);
-        std::rotate(tr_shape.begin(), tr_shape.begin() + 1, tr_shape.end());
+    //} else if (is_interleaved) {
+    //    // TODO: need to extend interleaved layers detection patterns when migration to ngraph is finished.
+    //    // make interleaved shape
+    //    ov::Shape tr_shape(concat_shape_out);
+    //    std::rotate(tr_shape.begin(), tr_shape.begin() + 1, tr_shape.end());
 
-        // make interleaved order
-        std::vector<size_t> tr_order(concat_shape_out.size());
-        std::iota(tr_order.begin(), tr_order.end(), 0);
-        std::rotate(tr_order.begin(), tr_order.begin() + 1, tr_order.end());
+    //    // make interleaved order
+    //    std::vector<size_t> tr_order(concat_shape_out.size());
+    //    std::iota(tr_order.begin(), tr_order.end(), 0);
+    //    std::rotate(tr_order.begin(), tr_order.begin() + 1, tr_order.end());
 
-        const int64_t tr_axis = std::distance(tr_order.begin(), std::find(tr_order.begin(), tr_order.end(), axis));
+    //    const int64_t tr_axis = std::distance(tr_order.begin(), std::find(tr_order.begin(), tr_order.end(), axis));
 
-        is_supported = graph_utils::get_first_valuable_dim_id(tr_shape) == tr_axis;
+    //    is_supported = graph_utils::get_first_valuable_dim_id(tr_shape) == tr_axis;
     } else {
         is_supported = graph_utils::get_first_valuable_dim_id(concat_shape_out) == axis;
     }
