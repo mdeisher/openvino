@@ -143,7 +143,9 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     manager.register_pass<ov::intel_gna::pass::RemoveOutputConvert>();
     manager.register_pass<ov::pass::ConvertSequenceToTensorIterator>();
     manager.register_pass<ov::pass::GRUCellDecomposition>();
-    manager.register_pass<ov::pass::LSTMCellDecomposition>();
+    //manager.register_pass<ov::pass::LSTMCellDecomposition>();
+    manager.register_pass<ov::pass::GnaLstmDecomposition>();
+    has_convolution = true;
     manager.register_pass<ov::intel_gna::pass::ConvertDWSCToScaleShifts>();
     manager.register_pass<ov::intel_gna::pass::ConvertPaddedToValidConv>();
     manager.register_pass<ov::intel_gna::pass::Decompose2DConvTransposedWithBiasAF>(config.gnaPrecision);
@@ -201,8 +203,8 @@ void TransformationsPipeline::apply(const std::shared_ptr<ov::Model>& model,
     manager.register_pass<ov::intel_gna::pass::GnaMhaSelfTransformation>();
     manager.register_pass<ov::intel_gna::pass::GnaMhaFqTransformation>();
     //manager.register_pass<ov::pass::Serialize>("after_mha.xml", "after_mha.bin");
-    manager.register_pass<ov::intel_gna::pass::GnaMatmulDparnTransformation>();
-    manager.register_pass<ngraph::pass::GnaMatMulDecomposition>();
+    //manager.register_pass<ov::intel_gna::pass::GnaMatmulDparnTransformation>();
+    //manager.register_pass<ngraph::pass::GnaMatMulDecomposition>();
     //manager.register_pass<ov::pass::Serialize>("after_matmul.xml", "after_matmul.bin");
     //manager.register_pass<ngraph::pass::GnaSoftmaxDecomposition>();
     manager.register_pass<ngraph::pass::GnaSoftmaxParallelDecomposition>();
