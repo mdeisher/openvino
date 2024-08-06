@@ -118,6 +118,9 @@ static const char context_window_message_r[] =
     "Works only with context window networks."
     " If you use the cw_r or cw_l flag, then batch size argument is ignored.";
 
+/// @brief message for wait time argument
+static const char wait_milliseconds_message[] = "Number of milliseconds delay between input batches (to simulate online scenario)";
+
 /// @brief message for inputs layer names
 static const char layout_message[] =
     "Optional. Prompts how network layouts should be treated by application. "
@@ -196,6 +199,9 @@ DEFINE_string(layout, "", layout_message);
 /// @brief PWL max error percent
 DEFINE_double(pwl_me, 1.0, pwl_max_error_percent_message);
 
+/// @brief Wait time (default 0)
+DEFINE_int32(w, 0, wait_milliseconds_message);
+
 /**
  * \brief This function show a help message
  */
@@ -225,6 +231,7 @@ static void show_usage() {
     std::cout << "    -exec_target \"<string>\"    " << execution_target_message << std::endl;
     std::cout << "    -compile_target \"<string>\" " << compile_target_message << std::endl;
     std::cout << "    -memory_reuse_off          " << memory_reuse_message << std::endl;
+    std::cout << "    -w \"<integer>\"          " << wait_milliseconds_message << std::endl;
 }
 
 /**
@@ -304,6 +311,10 @@ bool parse_and_check_command_line(int argc, char* argv[]) {
 
     if (FLAGS_pwl_me < 0.0 || FLAGS_pwl_me > 100.0) {
         throw std::logic_error("Invalid value for 'pwl_me' argument. It must be greater than 0.0 and less than 100.0");
+    }
+
+    if (FLAGS_w < 0.0) {
+        throw std::logic_error("Invalid value for 'w' argument. It must be positive.");
     }
 
     return true;

@@ -31,6 +31,80 @@
 
 using namespace ov::preprocess;
 
+typedef struct {
+#ifdef WIN32
+    //HANDLE hTimer;
+    void *hTimer;
+    long long int liDueTime;
+#else
+    pthread_mutex_t hTimer;
+    struct timespec tsTimerPeriod;
+#endif
+    uint32_t numMilliseconds;
+} interval_timer_t;
+
+bool CreateIntervalTimer(interval_timer_t *timer, uint32_t numMilliseconds) {
+    bool bError = false;
+    timer->numMilliseconds = numMilliseconds;
+    timer->liDueTime = -1;
+#ifdef WIN32
+    timer->hTimer = CreateWaitableTimer(NULL, FALSE, NULL);
+    if (timer->hTimer == NULL) {
+        std::cerr << "ERROR:  CreateWaitableTimer failed!" << std::endl;
+        return(EXIT_FAILURE);
+    }
+    // Set a timer to wait for XX miliseconds.
+    if (!SetWaitableTimer(timer->hTimer, (LARGE_INTEGER *)&timer->liDueTime, numMilliseconds, NULL, NULL, FALSE)) {
+        std::cerr << "ERROR:  SetWaitableTimer failed on " << numMilliseconds << " msec request!" << std::endl;
+        return(EXIT_FAILURE);
+    }
+#else
+    pthread_mutexattr_t mAttr;
+    pthread_mutexattr_init(&mAttr);
+    pthread_mutexattr_settype(&mAttr, PTHREAD_MUTEX_RECURSIVE_NP);
+    int32_t returnValue = pthread_mutex_init(&timer->hTimer, &mAttr);
+    if (returnValue != 0) {
+        std::cerr << "ERROR:  pthread_mutex_init returned " << returnValue << "!" << std::endl;
+        return(EXIT_FAILURE);
+    }
+#endif
+    return(bError);
+}
+
+void WaitIntervalTimer(interval_timer_t *timer) {
+#ifdef _WIN32
+    WaitForSingleObject(timer->hTimer, INFINITE);
+#else
+    int32_t errorNumber = pthread_mutex_timedlock(&timer->hTimer, &timer->tsTimerPeriod);
+
+    while (errorNumber == EAGAIN)
+        errorNumber = pthread_mutex_timedlock(&timer->hTimer, &timer->tsTimerPeriod);
+
+    if (errorNumber != ETIMEDOUT)
+        printf("ERROR: pthread mutex errno: %d\n", errorNumber);
+
+    timer->tsTimerPeriod.tv_nsec += timer->numMilliseconds * 1000000;
+    while (timer->tsTimerPeriod.tv_nsec >= 1000000000)
+    {
+        timer->tsTimerPeriod.tv_nsec -= 1000000000;
+        timer->tsTimerPeriod.tv_sec++;
+    }
+#endif
+}
+
+void DestroyIntervalTimer(interval_timer_t *timer) {
+#ifdef _WIN32
+    if (timer->hTimer)
+    {
+        CancelWaitableTimer(timer->hTimer);
+        CloseHandle(timer->hTimer);
+        timer->hTimer = NULL;
+    }
+#else
+    pthread_mutex_destroy(&timer->hTimer);
+#endif
+}
+
 /**
  * @brief The entry point for OpenVINO Runtime automatic speech recognition sample
  * @file speech_sample/main.cpp
@@ -81,6 +155,13 @@ int main(int argc, char* argv[]) {
             }
         }
         size_t numInputFiles(inputFiles.size());
+        interval_timer_t intervalTimer;
+        if (FLAGS_w > 0) {
+            if (CreateIntervalTimer(&intervalTimer, FLAGS_w)) {
+                std::cerr << "ERROR:  failed to create interval timer for wait mode!" << std::endl;
+                exit(EXIT_FAILURE);
+            }
+        }
 
         // --------------------------- Step 1. Initialize OpenVINO Runtime core and read model
         // -------------------------------------
@@ -603,6 +684,10 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     // -----------------------------------------------------------------------------------------------------
+
+                    if (FLAGS_w > 0) {  // wait until timer expires before filling input blob
+                        WaitIntervalTimer(&intervalTimer);
+                    }
                     int index = static_cast<int>(frameIndex) - (FLAGS_cw_l + FLAGS_cw_r);
                     /* Starting inference in asynchronous mode*/
                     inferRequest.inferRequest.start_async();
@@ -692,6 +777,9 @@ int main(int argc, char* argv[]) {
                               << std::endl;
                     print_reference_compare_results(vectorTotalError[next_output], numFrames, std::cout);
                 }
+            }
+    	    if (FLAGS_w > 0) {
+                DestroyIntervalTimer(&intervalTimer);
             }
         }
     } catch (const std::exception& error) {
