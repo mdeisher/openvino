@@ -529,6 +529,7 @@ static std::shared_ptr<ngraph::pattern::Matcher> create_matcher(ov::graph_rewrit
             return false;
         }
         auto fake_quantize_iter = pattern_to_output.find(fake_quantize);
+        auto node = iter->second.get_node_shared_ptr();
         return transform_to_pwl(std::tuple<ngraph::opset8::Sigmoid,
                                            ngraph::opset8::Tanh,
                                            ngraph::opset8::Exp,

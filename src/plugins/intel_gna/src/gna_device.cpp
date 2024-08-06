@@ -217,6 +217,25 @@ uint32_t GNADeviceHelper::createModel(Gna2Model& gnaModel) const {
 
     const auto status = Gna2ModelCreate(nGnaDeviceIndex, &gnaModel, &modelId);
 
+    bool print_model = false;
+    if (print_model) {
+        for (auto i = 0; i < gnaModel.NumberOfOperations; i++) {
+            auto layer = gnaModel.Operations[i];
+            printf("Layer %d type %d with %d operands %d parameters\n", i,
+                   layer.Type,
+                   layer.NumberOfOperands,
+                   layer.NumberOfParameters);
+            for (uint32_t j = 0; j < layer.NumberOfOperands; j++) {
+                if (layer.Operands[j] != nullptr) {
+                    printf("  tensor %d (", j);
+                    for (uint32_t k = 0; k < layer.Operands[j]->Shape.NumberOfDimensions; k++) {
+                        printf("%d,", layer.Operands[j]->Shape.Dimensions[k]);
+                    }
+                    printf(")\n");
+                }
+            }
+        }
+    }
     checkGna2Status(status, gnaModel);
     return modelId;
 }

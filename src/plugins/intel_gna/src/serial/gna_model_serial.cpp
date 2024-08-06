@@ -30,6 +30,8 @@
 #include "serial/headers/2dot8/gna_model_header.hpp"
 #include "serial/headers/2dot9/gna_model_header.hpp"
 #include "serial/headers/latest/gna_model_header.hpp"
+//#include "gna2_to_ir.hpp"
+//#include "gna2_profile.hpp"
 
 using namespace ov::intel_gna;
 
@@ -428,6 +430,11 @@ void GNAModelSerial::Export(const GnaAllocations& allocations, std::ostream& os)
     const std::vector<Gna2Operation> layers(gna2model_->Operations,
                                             gna2model_->Operations + gna2model_->NumberOfOperations);
 
+    //auto inputs = inputs_.Get()[0].ptrs;
+    //GnaWriteXml("gna_graph.xml", *gna2model_, inputs);
+
+    //GnaProfiler(gna2model_);
+
     const auto gnaGraphSize = allocations.GetSizeForExport();
     const auto& allocationsOrdered = allocations.GetAllocationsInExportOrder();
 
@@ -490,6 +497,7 @@ void GNAModelSerial::Export(const GnaAllocations& allocations, std::ostream& os)
     // 4. Write transposition output info - removed in v.2.9
     // 5. Write input endpoints and tensor names
     for (const auto& input : inputs_.Get()) {
+        printf("Input: %s %.08x - %.08x\n", input.name.c_str(), (int16_t*)input.ptrs[0], (int16_t*)input.ptrs[0] + input.num_elements);
         // write RuntimeEndPoint
         writeBits(convert_to_serial(input), os);
         // write the input tensor names
@@ -506,6 +514,7 @@ void GNAModelSerial::Export(const GnaAllocations& allocations, std::ostream& os)
     }
     // 6. Write outputs names
     for (auto& output : outputs_.Get()) {
+        printf("Output: %s %.08x\n", output.name.c_str(), output.ptrs[0]);
         // write the output name
         writeString(output.name, os);
     }
@@ -530,12 +539,24 @@ void GNAModelSerial::Export(const GnaAllocations& allocations, std::ostream& os)
     for (const auto& layer : layers) {
         writeBits(static_cast<uint32_t>(layer.Type), os);
         writeBits(layer.NumberOfOperands, os);
+        printf("writing layer type %d with %d operands %d parameters\n", layer.Type, layer.NumberOfOperands, layer.NumberOfParameters);
+        uint32_t input_size = 1;
+        for (uint32_t i = 0; i < layer.Operands[0]->Shape.NumberOfDimensions; i++) {
+            input_size *= layer.Operands[0]->Shape.Dimensions[i];
+        }
+        printf("   input %.08x - %.08x\n", layer.Operands[0]->Data, (int16_t*)layer.Operands[0]->Data + input_size);
 
         for (uint32_t i = 0; i < layer.NumberOfOperands; i++) {
             if (layer.Operands[i] == nullptr) {
                 writeBits(Gna2Tensor{}, os);
             } else {
                 Gna2Tensor tensor = getTensorWithProperOffset(*layer.Operands[i]);
+                printf("  tensor %d (", i);
+                for (uint32_t j = 0; j < tensor.Shape.NumberOfDimensions; j++) {
+                    printf("%d,", tensor.Shape.Dimensions[j]);
+                }
+                printf(")\n");
+
                 // we need to remove legacy (up to & including GNA HW 2.0) CNN enforement during export
                 // to avoid issues when importing and running the model on newer GNA HW with libGNA 2.1.x.y
                 if (i == OutOpIdx && layer.Type == Gna2OperationTypeConvolution) {

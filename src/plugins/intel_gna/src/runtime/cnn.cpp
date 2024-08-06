@@ -248,11 +248,13 @@ float CNN2DFilter32SingleHWC(const float bias,
                     const auto filterElement = filter[filterIndex];
                     const auto product = imageElement * filterElement;
                     output += product;
+//printf("input %e weight %e product %e accum %e\n", imageElement, filterElement, product, output);
                 }
             }
         }
     }
     output += bias;
+//printf("bias %e output %e\n", bias, output);
     return output;
 }
 
