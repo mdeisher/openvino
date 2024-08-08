@@ -459,7 +459,8 @@ int main(int argc, char* argv[]) {
         std::vector<std::vector<uint8_t>> ptrUtterances;
         const auto effective_outputs_size = outputs.size() ? outputs.size() : executableNet.outputs().size();
         std::vector<std::vector<uint8_t>> vectorPtrScores(effective_outputs_size);
-        std::vector<uint16_t> numScoresPerOutput(effective_outputs_size);
+        //std::vector<uint16_t> numScoresPerOutput(effective_outputs_size);
+        std::vector<size_t> numScoresPerOutput(effective_outputs_size);
 
         std::vector<std::vector<uint8_t>> vectorPtrReferenceScores(reference_name_files.size());
         std::vector<ScoreErrorT> vectorFrameError(reference_name_files.size()),
