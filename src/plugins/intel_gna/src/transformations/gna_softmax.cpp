@@ -297,6 +297,10 @@ bool ngraph::pass::GnaSoftmaxParallelDecomposition::run_on_model(const std::shar
             continue; // only support row softmax at this time
         }
 
+        if (H * W > 65535) {  // below implementation must fit in GNA 64K limit
+            continue;
+        }
+
         std::shared_ptr<FakeQuantize> fq_before = nullptr;
         std::shared_ptr<FakeQuantize> fq_after = nullptr;
         fq_before = std::dynamic_pointer_cast<FakeQuantize>(parent.get_node_shared_ptr());
@@ -402,40 +406,94 @@ bool ngraph::pass::GnaSoftmaxParallelDecomposition::run_on_model(const std::shar
             upstream[c] = reshape_3->output(0);
         }
 
-        auto combined_max = std::make_shared<ov::op::v0::Concat>(upstream, 1);
+        // Can parallelize up to 64K - find subsets that fit
+        // Coding this with nested concats is the easiest, but nested concats trigger 
+        // an infinite loop GNA plugin bug during quantization.  So instead, collect
+        // inputs for each concat separately and issue single concats.
+        std::vector<OutputVector> xm_concats;
+        {
+            OutputVector tmp;
+            tmp.push_back(upstream[0]);
+            xm_concats.push_back(tmp);
+        }
+        std::vector<size_t> new_widths;
+        new_widths.push_back(H * W);
+        for (size_t c = 1; c < C; c++) {
+            if ((new_widths.back() + H * W) > 65535) {
+                OutputVector tmp;
+                tmp.push_back(upstream[c]);
+                xm_concats.push_back(tmp);
+                new_widths.push_back(H * W);
+            } else {
+                xm_concats.back().push_back(upstream[c]);
+                new_widths[new_widths.size() - 1] = new_widths.back() + H * W;
+            }
+        }
+        // issue single concats
+        OutputVector x_max_parts;
+        for (size_t k = 0; k < xm_concats.size(); k++) {
+            if (xm_concats[k].size() > 1) {
+                auto new_concat = std::make_shared<ov::op::v0::Concat>(xm_concats[k], 1);
+                x_max_parts.push_back(new_concat->output(0));
+            } else {
+                x_max_parts.push_back(xm_concats[k].back());
+            }
+        }
+        OutputVector x_parts;
+        if (new_widths.size() > 1) {  // must process in parts
+            const auto split_lengths_const = Constant::create(ov::element::i64, ov::Shape{new_widths.size()}, new_widths.data());
+            auto split = std::make_shared<VariadicSplit>(parent_2d, Constant::create(ov::element::i64, ov::Shape{}, {1}), split_lengths_const);
+            for (auto i = 0; i < split->outputs().size(); i++) {
+                x_parts.push_back(split->output(i));
+            }
+        } else {
+            x_parts.push_back(parent_2d);
+        }
 
-        std::shared_ptr<ov::Node> x_minus_max = nullptr;
+        upstream.clear();
+        OutputVector x_minus_max_parts;
+        for (auto k = 0; k < x_parts.size(); k++) {
 #define PAR_SUBTRACT
 #define NUM_K 32
 #ifdef PAR_SUBTRACT
-        OutputVector subtract_operand;
-        subtract_operand.push_back(parent_2d);
-        subtract_operand.push_back(combined_max);
-        auto combined_sub = std::make_shared<ov::op::v0::Concat>(subtract_operand, 0);
-        auto new_transpose = std::make_shared<Transpose>(combined_sub->output(0), 
-            Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
-        size_t num_K = NUM_K;
-        while ((2 * C * H * W) % num_K != 0) {  // reduce parallelism if sizes don't match
-            num_K = num_K / 2;
-        }
-        if (num_K != NUM_K) {
-            printf("Warning:  failed to optimize parallel subtract\n");
-        }
-        auto new_reshape = std::make_shared<ov::op::v1::Reshape>(new_transpose->output(0),
-            Constant::create(element::i64, Shape{4}, {1ull, C * H * W / num_K, 2 * num_K, 1ull})->output(0),false);
-        std::vector<float> weight(num_K * 2 * num_K, 0.0);
-        for (size_t i = 0; i < num_K; i++) {
-            weight[i * num_K * 2 + i * 2 + 0] = 1.0f;
-            weight[i * num_K * 2 + i * 2 + 1] = -1.0f;
-        }
-        auto weight_const = Constant::create(ngraph::element::f32, Shape{num_K, 1, 2 * num_K, 1}, weight);
-        auto new_conv = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape->output(0),weight_const->output(0), 
-            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
-        x_minus_max = std::make_shared<ov::op::v1::Reshape>(new_conv->output(0),
-            Constant::create(element::i64, Shape{2}, {1ull, C * H * W})->output(0),false);
+            OutputVector subtract_operand;
+            subtract_operand.push_back(x_parts[k]);
+            subtract_operand.push_back(x_max_parts[k]);
+            auto combined_sub = std::make_shared<ov::op::v0::Concat>(subtract_operand, 0);
+            auto new_transpose = std::make_shared<Transpose>(combined_sub->output(0), 
+                Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
+            size_t num_K = NUM_K;
+            while ((2 * new_widths[k]) % num_K != 0) {  // reduce parallelism if sizes don't match
+                num_K = num_K / 2;
+            }
+            if (num_K != NUM_K) {
+                printf("Warning:  failed to optimize parallel subtract\n");
+            }
+            auto new_reshape = std::make_shared<ov::op::v1::Reshape>(new_transpose->output(0),
+                Constant::create(element::i64, Shape{4}, {1ull, new_widths[k] / num_K, 2 * num_K, 1ull})->output(0),false);
+            std::vector<float> weight(num_K * 2 * num_K, 0.0);
+            for (size_t i = 0; i < num_K; i++) {
+                weight[i * num_K * 2 + i * 2 + 0] = 1.0f;
+                weight[i * num_K * 2 + i * 2 + 1] = -1.0f;
+            }
+            auto weight_const = Constant::create(ngraph::element::f32, Shape{num_K, 1, 2 * num_K, 1}, weight);
+            auto new_conv = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape->output(0),weight_const->output(0), 
+                Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
+            auto x_minus_max = std::make_shared<ov::op::v1::Reshape>(new_conv->output(0),
+                Constant::create(element::i64, Shape{2}, {1ull, new_widths[k]})->output(0),false);
 #else
-        x_minus_max = std::make_shared<op::v1::Subtract>(parent_2d, combined_max->output(0));
+            auto x_minus_max = std::make_shared<op::v1::Subtract>(x_parts[i], x_max_parts[i]);
 #endif
+            x_minus_max_parts.push_back(x_minus_max->output(0));
+        }
+
+        std::shared_ptr<ov::Node> x_minus_max = nullptr;
+        if (x_parts.size() > 1) {
+            x_minus_max = std::make_shared<ngraph::opset1::Concat>(x_minus_max_parts, 1);
+        } else {
+            x_minus_max = x_minus_max_parts[0].get_node_shared_ptr();
+        }
+
         // perform softmax in log domain
         Output<Node> prev;
 #define EXP_CONV
@@ -522,43 +580,87 @@ bool ngraph::pass::GnaSoftmaxParallelDecomposition::run_on_model(const std::shar
             }
         }
 
-        auto combined_log_avg = std::make_shared<ov::op::v0::Concat>(upstream, 1);
-
-        std::shared_ptr<ov::Node> softmax_output_1d = nullptr;
+        // Coding this with nested concats is the easiest, but nested concats trigger 
+        // an infinite loop GNA plugin bug during quantization.  So instead, collect
+        // inputs for each concat separately and issue single concats.
+        std::vector<OutputVector> cla_concats;
+        {
+            OutputVector tmp;
+            tmp.push_back(upstream[0]);
+            cla_concats.push_back(tmp);
+        }
+        size_t sum_width = H * W;
+        for (size_t c = 1; c < C; c++) {
+            if ((sum_width + H * W) > 65535) {
+                OutputVector tmp;
+                tmp.push_back(upstream[c]);
+                cla_concats.push_back(tmp);
+                sum_width = H * W;
+            } else {
+                cla_concats.back().push_back(upstream[c]);
+                sum_width += H * W;
+            }
+        }
+        // issue single concats
+        OutputVector combined_log_avg_parts;
+        OutputVector minus_log_W_out_parts;
+        for (size_t k = 0; k < cla_concats.size(); k++) {
+            if (cla_concats[k].size() > 1) {
+                auto new_concat = std::make_shared<ov::op::v0::Concat>(cla_concats[k], 1);
+                combined_log_avg_parts.push_back(new_concat->output(0));
+            } else {
+                combined_log_avg_parts.push_back(cla_concats[k].back());
+            }
+            std::vector<float> minus_log_W_part(cla_concats[k].size() * H * W, -log((float)W));
+            auto new_const_out = MakeWeights(Shape{1, cla_concats[k].size() * H * W}, minus_log_W_part, -log((float)W), (bool)fq_input);
+            minus_log_W_out_parts.push_back(new_const_out);
+        }
+ 
+        OutputVector softmax_output_1d_parts;
+        for (auto k = 0; k < x_parts.size(); k++) {
 #define PAR_ADD
 #define NUM_K_ADD 32
 #ifdef PAR_ADD
-        OutputVector add_operand;
-        add_operand.push_back(x_minus_max->output(0));
-        add_operand.push_back(minus_log_W_out);
-        add_operand.push_back(combined_log_avg);
-        auto combined_add = std::make_shared<ov::op::v0::Concat>(add_operand, 0);
-        auto new_transpose_add = std::make_shared<Transpose>(combined_add->output(0), 
-            Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
-        size_t num_K_add = NUM_K_ADD;
-        while ((3 * C * H * W) % num_K_add != 0) {  // reduce parallelism if sizes don't match
-            num_K_add = num_K_add / 2;
-        }
-        if (num_K_add != NUM_K_ADD) {
-            printf("Warning:  failed to optimize parallel add\n");
-        }
-        auto new_reshape_add = std::make_shared<ov::op::v1::Reshape>(new_transpose_add->output(0),
-            Constant::create(element::i64, Shape{4}, {1ull, C * H * W / num_K_add, 3 * num_K_add, 1ull})->output(0),false);
-        std::vector<float> weight_add(num_K_add * 3 * num_K_add, 0.0);
-        for (size_t i = 0; i < num_K_add; i++) {
-            weight_add[i * num_K_add * 3 + i * 3 + 0] = 1.0f;
-            weight_add[i * num_K_add * 3 + i * 3 + 1] = 1.0f;
-            weight_add[i * num_K_add * 3 + i * 3 + 2] = -1.0f;
-        }
-        auto weight_add_const = Constant::create(ngraph::element::f32, Shape{num_K_add, 1, 3 * num_K_add, 1}, weight_add);
-        auto new_conv_add = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape_add->output(0),weight_add_const->output(0), 
-            Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
-        softmax_output_1d = std::make_shared<op::Exp>(new_conv_add->output(0));
+            OutputVector add_operand;
+            add_operand.push_back(x_minus_max_parts[k]);
+            add_operand.push_back(minus_log_W_out_parts[k]);
+            add_operand.push_back(combined_log_avg_parts[k]);
+            auto combined_add = std::make_shared<ov::op::v0::Concat>(add_operand, 0);
+            auto new_transpose_add = std::make_shared<Transpose>(combined_add->output(0), 
+                Constant::create(ov::element::Type_t::i64, ov::Shape{2}, {1,0}));
+            size_t num_K_add = NUM_K_ADD;
+            while ((3 * new_widths[k]) % num_K_add != 0) {  // reduce parallelism if sizes don't match
+                num_K_add = num_K_add / 2;
+            }
+            if (num_K_add != NUM_K_ADD) {
+                printf("Warning:  failed to optimize parallel add\n");
+            }
+            auto new_reshape_add = std::make_shared<ov::op::v1::Reshape>(new_transpose_add->output(0),
+                Constant::create(element::i64, Shape{4}, {1ull, new_widths[k] / num_K_add, 3 * num_K_add, 1ull})->output(0),false);
+            std::vector<float> weight_add(num_K_add * 3 * num_K_add, 0.0);
+            for (size_t i = 0; i < num_K_add; i++) {
+                weight_add[i * num_K_add * 3 + i * 3 + 0] = 1.0f;
+                weight_add[i * num_K_add * 3 + i * 3 + 1] = 1.0f;
+                weight_add[i * num_K_add * 3 + i * 3 + 2] = -1.0f;
+            }
+            auto weight_add_const = Constant::create(ngraph::element::f32, Shape{num_K_add, 1, 3 * num_K_add, 1}, weight_add);
+            auto new_conv_add = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape_add->output(0),weight_add_const->output(0), 
+                Strides{1, 1}, CoordinateDiff{0, 0}, CoordinateDiff{0, 0}, Strides{1, 1}, ov::op::PadType::VALID );
+            softmax_output_1d_parts.push_back(std::make_shared<op::Exp>(new_conv_add->output(0)));
 #else
-        auto diff_1 = std::make_shared<op::v1::Add>(x_minus_max->output(0), minus_log_W_out);
-        auto diff_2 = std::make_shared<op::v1::Subtract>(diff_1->output(0), combined_log_avg->output(0));
-        softmax_output_1d = std::make_shared<op::Exp>(diff_2->output(0));
+            auto diff_1 = std::make_shared<op::v1::Add>(x_minus_max_parts[k], minus_log_W_out_parts[k]);
+            auto diff_2 = std::make_shared<op::v1::Subtract>(diff_1->output(0), combined_log_avg_parts[k]);
+            softmax_output_1d_parts.push_back(std::make_shared<op::Exp>(diff_2->output(0))->output(0));
 #endif
+        }
+
+        std::shared_ptr<ov::Node> softmax_output_1d = nullptr;
+        if (softmax_output_1d_parts.size() > 1) {
+            softmax_output_1d = std::make_shared<ngraph::opset1::Concat>(softmax_output_1d_parts, 1);
+        } else {
+            softmax_output_1d = softmax_output_1d_parts[0].get_node_shared_ptr();
+        }
+
         if (softmax_shape.size() == 4) {
             auto new_reshape = std::make_shared<ngraph::opset1::Reshape>(softmax_output_1d->output(0),
                 op::Constant::create(ngraph::element::i64, Shape{4}, {N, C, H, W})->output(0),false);
