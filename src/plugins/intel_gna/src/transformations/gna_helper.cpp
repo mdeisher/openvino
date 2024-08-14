@@ -911,9 +911,13 @@ ov::Output<ov::Node> InsertOutputFQ(const ov::Output<ov::Node>& matmul_out, std:
 }
 
 ov::Output<ov::Node> InsertOutputFQ(const ov::Output<ov::Node>& matmul_out, std::shared_ptr<ov::Node> old) {
-    auto old_FQ = std::dynamic_pointer_cast<ov::op::v0::FakeQuantize>(old);
-    auto levels = old_FQ->get_levels();
-    return InsertOutputFQ(matmul_out, old, 1.0f, levels);
+    if (old) {
+        auto old_FQ = std::dynamic_pointer_cast<ov::op::v0::FakeQuantize>(old);
+        auto levels = old_FQ->get_levels();
+        return InsertOutputFQ(matmul_out, old, 1.0f, levels);
+    } else {
+        return matmul_out;
+    }
 }
 
 std::shared_ptr<ov::Node> InsertWeights(ov::Shape shape, std::vector<float> data, bool use_fq) {
