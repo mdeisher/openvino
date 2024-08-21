@@ -47,6 +47,7 @@ void GetConvData(std::shared_ptr<ngraph::opset7::Convolution> conv, ConvData& co
 
 void GetConvData(std::shared_ptr<ov::intel_gna::op::GNAConvolution> conv, ConvData& conv_data) {
     OPENVINO_ASSERT(conv);
+    /*
     conv_data.output_height = conv->get_output_shape(0)[2];
     conv_data.output_width = conv->get_output_shape(0)[3];
     conv_data.input_channel_count = conv->input_value(0).get_shape()[3];
@@ -65,6 +66,41 @@ void GetConvData(std::shared_ptr<ov::intel_gna::op::GNAConvolution> conv, ConvDa
     conv_data.pads_begin_width = conv->get_pads_begin()[1];
     conv_data.pads_end_height = conv->get_pads_end()[0];
     conv_data.pads_end_width = conv->get_pads_end()[1];
+    conv_data.padding_type = conv->get_auto_pad();
+    conv_data.element_type = conv->get_element_type();
+    */
+
+    const auto input_rank = conv->get_input_shape(0).size();
+    conv_data.input_channel_count = conv->input_value(0).get_shape().back();
+    conv_data.input_width = conv->input_value(0).get_shape()[input_rank - 2];
+    conv_data.filter_count = conv->input_value(1).get_shape().front();
+    conv_data.filter_channel_count = conv->input_value(1).get_shape().back();
+    conv_data.filter_width = conv->input_value(1).get_shape()[input_rank - 2];
+    conv_data.filter_dilation_width = conv->get_dilations()[input_rank - 3];
+    conv_data.filter_stride_width = conv->get_strides()[input_rank - 3];
+    conv_data.output_channel_count = conv_data.filter_count;
+    conv_data.output_width = conv->get_output_shape(0)[input_rank - 2];
+    conv_data.pads_begin_width = conv->get_pads_begin()[input_rank - 3];
+    conv_data.pads_end_width = conv->get_pads_end()[input_rank - 3];
+
+    if (conv->get_input_shape(0).size() == 4) {
+        conv_data.input_height = conv->input_value(0).get_shape()[1];
+        conv_data.filter_height = conv->input_value(1).get_shape()[1];
+        conv_data.filter_dilation_height = conv->get_dilations()[0];
+        conv_data.filter_stride_height = conv->get_strides()[0];
+        conv_data.output_height = conv->get_output_shape(0)[1];
+        conv_data.pads_begin_height = conv->get_pads_begin()[0];
+        conv_data.pads_end_height = conv->get_pads_end()[0];
+    } else {
+        conv_data.input_height = 1;
+        conv_data.filter_height = 1;
+        conv_data.filter_dilation_height = 1;
+        conv_data.filter_stride_height = 1;
+        conv_data.output_height = 1;
+        conv_data.pads_begin_height = 0;
+        conv_data.pads_end_height = 0;
+    }
+
     conv_data.padding_type = conv->get_auto_pad();
     conv_data.element_type = conv->get_element_type();
 }
