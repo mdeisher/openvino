@@ -32,7 +32,7 @@ endif()
 
 # add sample
 
-ov_add_sample(NAME fft
+ov_add_sample(NAME make_fft
               SOURCES ${SRC}
               HEADERS ${HDR}
-              DEPENDENCIES ${GFLAGS_TARGET} cnpy ie_samples_utils)
+              DEPENDENCIES ${GFLAGS_TARGET} cnpy ie_samples_utils format_reader inference_engine_transformations)

@@ -35,7 +35,6 @@
 #include "ngraph/opsets/opset2.hpp"
 #include "ngraph/opsets/opset3.hpp"
 #include "transformations/common_optimizations/common_optimizations.hpp"
-#include "transformations/serialize.hpp"
 
 using namespace InferenceEngine;
 using namespace ngraph;
@@ -437,7 +436,6 @@ int main(int argc, char* argv[]) {
 
     // --------------------------- 1. Load inference engine -------------------------------------
     std::cout << "Loading Inference Engine" << std::endl;
-    Core ie;
 
     std::vector<float> real(N, 0.0);
     std::vector<float> imag(N, 0.0);
@@ -500,7 +498,7 @@ int main(int argc, char* argv[]) {
 
     //--------------------------- 2. Create network using ngraph function -----------------------------------
     ngraph::pass::Manager manager;
-    manager.register_pass<ngraph::pass::Serialize>("fft.xml", "fft.bin", ngraph::pass::Serialize::Version::IR_V10);
+    manager.register_pass<ov::pass::Serialize>("fft.xml", "fft.bin", ov::pass::Serialize::Version::IR_V10);
     const auto& pass_config = manager.get_pass_config();
     manager.run_passes(createNgraphFunctionCustomer(N, LOGN));
 
