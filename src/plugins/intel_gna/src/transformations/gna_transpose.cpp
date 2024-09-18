@@ -171,7 +171,51 @@ bool ngraph::pass::GnaTransposeDecomposition::run_on_model(const std::shared_ptr
                     is_graph_modfied = true;
                     continue;                    
                 }
-
+		/*
+		if ((H_new <= 8) || (W_new <= 8)) {
+		  auto new_reshape = std::make_shared<ov::opset11::Reshape>(parent,
+		    ov::opset11::Constant::create(ngraph::element::i64, Shape{2}, {H_new, W_new})->output(0),false);
+		  if ((W_new <= 8) && ((H_new % 8) != 0)) {
+                    auto H_pad = 8 - (H_new % 8);
+                    std::vector<float> padding(H_pad * W_new,0.0f);
+                    float* padding_ptr = padding.data();
+                    ov::Shape padding_shape;
+                    padding_shape.push_back(H_pad);
+                    padding_shape.push_back(W_new);
+                    auto padding_const = ov::opset11::Constant::create(ngraph::element::f32, padding_shape, padding);
+                    OutputVector args;
+                    args.push_back(new_reshape->output(0));
+                    args.push_back(padding_const->output(0));
+                    auto new_concat = std::make_shared<ov::opset11::Concat>(args, 0);
+                    auto new_transpose = std::make_shared<ov::opset11::Transpose>(new_concat->output(0),
+			  ov::opset11::Constant::create(element::Type_t::i64, Shape{2}, {1, 0}));
+                    // convolution is used to strip off the padding
+                    std::vector<float> new_weights(H_pad + 1, 0.0f);
+                    new_weights[0] = 1.0f;  // kernel designed to copy input except for last H_pad columns
+                    float* new_weight_ptr = new_weights.data();
+                    ov::Strides new_strides = {1, 1};
+                    ov::CoordinateDiff new_pads_begin = {0, 0};
+                    ov::CoordinateDiff new_pads_end = {0, 0};
+                    ov::Strides new_dilations = {1, 1};
+                    auto new_weights_const = ov::opset11::Constant::create(ngraph::element::f32, {1, 1, H_pad + 1, 1}, new_weights);
+                    new_reshape = std::make_shared<ov::opset11::Reshape>(new_transpose->output(0),
+			 ov::opset11::Constant::create(ngraph::element::i64, Shape{4}, {1ull, W_new, H_new + H_pad, 1ull})->output(0),false);
+                    auto new_conv = std::make_shared<ov::intel_gna::op::GNAConvolution>(new_reshape->output(0),
+			new_weights_const->output(0),new_strides,new_pads_begin,new_pads_end,new_dilations,ov::op::PadType::EXPLICIT);
+                    new_reshape = std::make_shared<ov::opset11::Reshape>(new_conv->output(0),
+			 ov::opset11::Constant::create(ngraph::element::i64, Shape{2}, {W_new, H_new})->output(0),false);
+                    ngraph::replace_node_update_name(transpose, new_reshape);
+		  } else {
+                    auto new_transpose = std::make_shared<ov::opset11::Transpose>(new_reshape->output(0),
+										  ov::opset11::Constant::create(element::Type_t::i64, Shape{2}, {1, 0}));
+                    new_reshape = std::make_shared<ov::opset11::Reshape>(new_transpose->output(0),
+			 ov::opset11::Constant::create(ngraph::element::i64, Shape{output_shape.size()}, output_shape)->output(0),false);
+		  }
+		  ngraph::replace_node_update_name(transpose, new_reshape);
+		  return true;                    
+		}
+		*/
+		
                 // GNA-incompatible transpose
                 if (((H_new % 8) == 0) || ((W_new % 8) == 0)) {
                     bool factor_W = ((W_new % 8) == 0);
