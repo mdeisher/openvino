@@ -149,6 +149,10 @@ std::string GetGnaTypeName(Gna2OperationType type) {
         type_name = "GnaDiagonalAffine";
     } else if (type == Gna2OperationTypeTransposition) {
         type_name = "GnaTranspose";
+    } else if (type == Gna2OperationTypeEnhancedCopy ) {
+        type_name = "GnaCopy";
+    } else {
+        printf("Warning:  operator type %d not yet handled!\n", type);
     }
     return type_name;
 }
@@ -204,7 +208,7 @@ void BuildGnaNodeList(std::vector<gna_node>& node_list, Gna2Model model) {
 		if (op.Type == Gna2OperationTypeConvolution) {
 			node.input.push_back(GnaPort(op.Operands[2], "weights", 2));
 			node.attribute.push_back(GnaAttribute("kernelShape", DimensionsToString((Gna2Shape*)&op.Operands[2]->Shape)));
-			if (op.Operands[3]) {
+			if (op.Operands[3] && (op.Operands[3]->Mode != Gna2TensorModeDisabled)) {
 				node.input.push_back(GnaPort(op.Operands[3], "bias", 3));
 				node.attribute.push_back(GnaAttribute("biasShape", DimensionsToString((Gna2Shape*)&op.Operands[3]->Shape)));
 			}
@@ -256,7 +260,7 @@ void BuildGnaNodeList(std::vector<gna_node>& node_list, Gna2Model model) {
 		} else if (model.Operations[i].Type == Gna2OperationTypeFullyConnectedAffine) {
 			node.input.push_back(GnaPort(op.Operands[2], "weights", 2));
 			node.attribute.push_back(GnaAttribute("weightShape", DimensionsToString((Gna2Shape*)&op.Operands[2]->Shape)));
-            if (op.Operands[3]) {
+            if (op.Operands[3] && (op.Operands[3]->Mode != Gna2TensorModeDisabled)) {
                 node.input.push_back(GnaPort(op.Operands[3], "bias", 3));
                 node.attribute.push_back(GnaAttribute("biasShape", DimensionsToString((Gna2Shape*)&op.Operands[3]->Shape)));
             }
@@ -276,14 +280,18 @@ void BuildGnaNodeList(std::vector<gna_node>& node_list, Gna2Model model) {
 			}
 			if (op.NumberOfParameters > 1) {
 				uint32_t* biasVectorIndex = (uint32_t*)op.Parameters[1];
-				node.attribute.push_back(GnaAttribute("biasVectorIndex", std::to_string(*biasVectorIndex)));
+                if (biasVectorIndex != NULL) {
+                    node.attribute.push_back(GnaAttribute("biasVectorIndex", std::to_string(*biasVectorIndex)));
+                }
 			}
 
 		} else if (model.Operations[i].Type == Gna2OperationTypeElementWiseAffine) {
 			node.input.push_back(GnaPort(op.Operands[2], "weights", 2));
 			node.attribute.push_back(GnaAttribute("weightShape", DimensionsToString((Gna2Shape*)&op.Operands[2]->Shape)));
-			node.input.push_back(GnaPort(op.Operands[3], "bias", 3));
-			node.attribute.push_back(GnaAttribute("biasShape", DimensionsToString((Gna2Shape*)&op.Operands[3]->Shape)));
+            if (op.Operands[3] && (op.Operands[3]->Mode != Gna2TensorModeDisabled)) {
+                node.input.push_back(GnaPort(op.Operands[3], "bias", 3));
+                node.attribute.push_back(GnaAttribute("biasShape", DimensionsToString((Gna2Shape*)&op.Operands[3]->Shape)));
+            }
 			if (op.Operands[4]) {
 				node.input.push_back(GnaPort(op.Operands[4], "activation", 4));
 			}
@@ -445,7 +453,7 @@ bool SetCoversRegion(std::vector<gna_memory_region> set, gna_memory_region regio
 void BuildGnaEdgeListByOutput(std::vector<gna_edge>& edge_list, std::vector<gna_node> node_list) {
     // Creates a vector of gna_edge structures given a vector of gna_node structures
     for (uint32_t i = 0; i < node_list.size(); i++) {
-        PrintNode(node_list[i]);
+        //PrintNode(node_list[i]);
         for (uint32_t j = 0; j < node_list[i].output.size(); j++) {
             bool edge_found = false;
             bool overwrite = false;
@@ -454,8 +462,8 @@ void BuildGnaEdgeListByOutput(std::vector<gna_edge>& edge_list, std::vector<gna_
                 for (uint32_t l = 0; l < node_list[k].input.size(); l++) {
                     if (BufferOverwrite(node_list[i].output[j].region, node_list[k].input[l].region)) {
                         edge_list.push_back(GnaEdge(i, j, k, l));
-                        printf("Edge %s %s --> %s %s\n", node_list[i].name.c_str(), node_list[i].output[j].name.c_str(),
-                               node_list[k].name.c_str(), node_list[k].input[l].name.c_str());
+                        //printf("Edge %s %s --> %s %s\n", node_list[i].name.c_str(), node_list[i].output[j].name.c_str(),
+                        //       node_list[k].name.c_str(), node_list[k].input[l].name.c_str());
                         edge_found = true;
                     }
                 }
@@ -666,7 +674,7 @@ void InsertDummyNodes(std::vector<gna_node>& node_list, std::vector<void*> graph
                             attr = AddressToAttribute("input"+std::to_string(concat.input.size())+"End", output.region.end);
                             concat.attribute.push_back(attr);
                             attr.name = "input" + std::to_string(concat.input.size()) + "Shape";
-                            attr.value = DimensionsToString(&output.shape);
+                            attr.value = DimensionsToString(&input.shape);
                             concat.attribute.push_back(attr);
                             concat.input.push_back(output);
                         }
@@ -687,22 +695,24 @@ void InsertDummyNodes(std::vector<gna_node>& node_list, std::vector<void*> graph
                     }
                     // remove overlap from remaining_region
                     for (uint32_t l = 0; l < member_of_region.size(); l++) {
-                        gna_memory_region remaining = remaining_region[member_of_region[l]];
-                        gna_memory_region overlap = IntersectionRegion(intersection[k], remaining_region[member_of_region[l]]);
-                        if (overlap.start == remaining.start) {
-                            if (overlap.end < remaining.end) {      // remove beginning of region
-                                remaining_region[member_of_region[l]].start = overlap.end;
-                            } else {                                // remove entire region
-                                remaining_region.erase(remaining_region.begin() + member_of_region[l]);
+                        if (member_of_region[l] < remaining_region.size()) {
+                            gna_memory_region remaining = remaining_region[member_of_region[l]];
+                            gna_memory_region overlap = IntersectionRegion(intersection[k], remaining_region[member_of_region[l]]);
+                            if (overlap.start == remaining.start) {
+                                if (overlap.end < remaining.end) {      // remove beginning of region
+                                    remaining_region[member_of_region[l]].start = overlap.end;
+                                } else {                                // remove entire region
+                                    remaining_region.erase(remaining_region.begin() + member_of_region[l]);
+                                }
+                            } else if (overlap.end == remaining.end) {  // remove end of region
+                                remaining_region[member_of_region[l]].end = overlap.start;
+                            } else {                                    // remove middle of region, split region
+                                gna_memory_region new_remaining;
+                                new_remaining.start = overlap.end;
+                                new_remaining.end = remaining_region[member_of_region[l]].end;
+                                remaining_region[member_of_region[l]].end = overlap.start;
+                                remaining_region.insert(remaining_region.begin() + member_of_region[l] + 1, new_remaining);
                             }
-                        } else if (overlap.end == remaining.end) {  // remove end of region
-                            remaining_region[member_of_region[l]].end = overlap.start;
-                        } else {                                    // remove middle of region, split region
-                            gna_memory_region new_remaining;
-                            new_remaining.start = overlap.end;
-                            new_remaining.end = remaining_region[member_of_region[l]].end;
-                            remaining_region[member_of_region[l]].end = overlap.start;
-                            remaining_region.insert(remaining_region.begin() + member_of_region[l] + 1, new_remaining);
                         }
                     }
                     if (remaining_region.size() == 0) {
@@ -716,6 +726,8 @@ void InsertDummyNodes(std::vector<gna_node>& node_list, std::vector<void*> graph
                             input.type_name = "I" + std::to_string(8 * GnaDataNumBytes(input.type));
                             input.is_constant = true;
                             input.num_elements = (uint32_t)(input.region.end - input.region.start) / GnaDataNumBytes(input.type);
+                            input.shape.NumberOfDimensions = 1;
+                            input.shape.Dimensions[0] = input.num_elements;
                             concat.input.push_back(input);
                             // Need to create more dummy inputs here or perhaps make a second input
                             // pass after concat detection pass.
@@ -784,8 +796,8 @@ void BuildGnaEdgeList(std::vector<gna_edge>& edge_list, std::vector<gna_node> no
                 if ((node_list[k].output.size() > 0) && node_list[k].output[0].is_constant) {
                     if (ContainedIn(node_list[i].input[j].region, node_list[k].output[0].region)) {
                         edge_list.push_back(GnaEdge(k, 0, i, j));
-                        //printf("Edge %s %s %d --> %s %s %d\n", node_list[k].name.c_str(), node_list[k].output[0].name.c_str(), 0,
-                        //       node_list[i].name.c_str(), node_list[i].input[j].name.c_str(), j);
+                        printf("Edge %s %s %d --> %s %s %d\n", node_list[k].name.c_str(), node_list[k].output[0].name.c_str(), 0,
+                               node_list[i].name.c_str(), node_list[i].input[j].name.c_str(), j);
                         found = true;
                         break;
                     }
@@ -880,6 +892,7 @@ void FixupInsertSlices(std::vector<gna_node>& node_list, std::vector<gna_edge>& 
         }
     }
     for (uint32_t i = 0; i < slices.size(); i++) {
+        //PrintNode(slices[i]);
         gna_edge new_edge = edge_list[to_replace[i]];
         node_list.push_back(slices[i]);
         edge_list[to_replace[i]].to_layer = node_list.size() - 1;
