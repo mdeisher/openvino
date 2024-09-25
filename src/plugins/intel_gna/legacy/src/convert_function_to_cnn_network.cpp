@@ -2149,7 +2149,7 @@ void convertFunctionToICNNNetwork(const std::shared_ptr<const ::ngraph::Function
     cnnNetworkImpl->setName(graph->get_friendly_name());
 
     const ngraph::NodeVector& nodes = graph->get_ops();
-    bool keep_constants = keep_constant_inputs || ::ov::op::util::has_op_with_type<::ngraph::op::FakeQuantize>(graph);
+    bool keep_constants = keep_constant_inputs;
 
     std::unordered_map<std::string, std::shared_ptr<ngraph::Node>> unique_names;
     auto can_change_name = [](const std::shared_ptr<ngraph::Node>& node) -> bool {

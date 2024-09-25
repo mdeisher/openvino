@@ -477,8 +477,15 @@ GnaTransposePreDecomposition::GnaTransposePreDecomposition() {
 }
 
 static bool decompose_split(std::shared_ptr<ov::opset11::Split> split) {
+    auto axis = *(std::dynamic_pointer_cast<ov::opset11::Constant>(split->input_value(1).get_node_shared_ptr())
+                    ->get_data_ptr<int64_t>());
     auto parent = split->input_value(0).get_node_shared_ptr();
     auto input_shape = parent->get_shape();
+
+    if (axis != 1 || input_shape[0] == 1) {
+        return false;
+    }
+
     auto output_shape = split->output(0).get_shape();
     auto parent_copy = parent->clone_with_new_inputs(parent->input_values());
     auto transpose_const = ov::opset11::Constant::create(element::Type_t::i64, Shape{2}, {1, 0});
